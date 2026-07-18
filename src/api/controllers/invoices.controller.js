@@ -47,7 +47,6 @@ async function invoiceDetail(req, res) {
   const cust = d.customer || {};
   const det = d.invoiceDetails || {};
 
-  // Frequency per line item: prefer the stored enrichment; else match live against the customer's pricing.
   const cid = customerIdFromLink(cust.link);
   const [stored, acct] = await Promise.all([
     InvoiceFrequency.findOne({ invoiceNumber: d.invoiceNumber }).lean(),

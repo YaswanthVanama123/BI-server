@@ -23,8 +23,6 @@ function bucketKey(dk, g) {
   return dk.slice(0, 7);
 }
 
-// Load closed-invoice "stops" for the range, joined with the customer's route, applying an optional
-// route filter. Shared by all three analytics endpoints.
 async function loadStops(req) {
   const db = getSourceDb();
   const from = clean(req.query.from);
@@ -45,7 +43,6 @@ async function loadStops(req) {
   for (const inv of invoices) {
     const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
-    // Route = technician = the invoice's assignedTo (NRV1…).
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
     if (routeCode && rc !== routeCode) continue;
     const arr = toMinutes(inv.arrivalTime);
@@ -60,7 +57,6 @@ async function loadStops(req) {
   return { stops, from, to, routeCode };
 }
 
-// Per technician+day rollup (stops, service, working-day span).
 function perTechDay(stops) {
   const g = new Map();
   for (const s of stops) {
@@ -80,7 +76,6 @@ function perTechDay(stops) {
   return out;
 }
 
-// GET /ops/technician-utilization — on-site service time as a share of the working-day span, per tech.
 async function technicianUtilization(req, res) {
   const { stops, from, to, routeCode } = await loadStops(req);
   const days = perTechDay(stops);
@@ -113,7 +108,6 @@ async function technicianUtilization(req, res) {
   res.json(buildEnvelope({ kpis, rows }, { meta: { source: 'inventory_db', from: from || null, to: to || null, routeCode: routeCode || null } }));
 }
 
-// GET /ops/stops-per-technician — stop counts + productivity per technician.
 async function stopsPerTechnician(req, res) {
   const { stops, from, to, routeCode } = await loadStops(req);
   const days = perTechDay(stops);
@@ -140,7 +134,6 @@ async function stopsPerTechnician(req, res) {
   res.json(buildEnvelope({ kpis, rows }, { meta: { source: 'inventory_db', from: from || null, to: to || null, routeCode: routeCode || null } }));
 }
 
-// GET /ops/stop-volume — stop volume over time (granularity buckets) + by route + by weekday.
 async function stopVolume(req, res) {
   const { stops, from, to, routeCode } = await loadStops(req);
   const granularity = ['day', 'week', 'month'].includes(req.query.granularity) ? req.query.granularity : 'month';

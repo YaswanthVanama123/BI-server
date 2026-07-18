@@ -1,8 +1,4 @@
 'use strict';
-// Match each closed invoice's line items to the customer's pricing (item name + price) and STORE the
-// resulting service frequency per line in bi_invoicefrequencies. Skips invoices already enriched, so
-// re-runs only process newly-added invoices (use --all to re-do everything).
-// Usage: npm run enrich:frequencies [-- --all --limit=N]
 const { connectDatabase, disconnectDatabase, getSourceDb } = require('../src/config/database');
 const { models } = require('../src/models');
 const { frequencyFor } = require('../src/services/pricingMatch');

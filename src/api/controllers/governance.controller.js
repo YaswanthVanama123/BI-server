@@ -65,7 +65,6 @@ async function importBatches(req, res) {
   res.json(buildEnvelope(rows));
 }
 
-// GET /sync/status — live in-progress background jobs + recent run history + source watermarks.
 async function syncStatus(req, res) {
   const acct = accountJob.snapshot();
   const dist = distancesJob.snapshot(req.tenant || req.tenantId);

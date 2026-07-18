@@ -59,7 +59,6 @@ async function extractAllRows(page, { holderSel, headerSel, rowSel }) {
   return out;
 }
 
-// Map the header-keyed pricing rows to normalized fields.
 function mapPricing(rowObjs) {
   return rowObjs
     .map((o) => ({

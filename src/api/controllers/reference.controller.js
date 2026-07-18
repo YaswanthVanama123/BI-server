@@ -36,7 +36,6 @@ async function customers(req, res) {
     if (r.customerId && r.frequency && !freqByCust.has(r.customerId)) freqByCust.set(r.customerId, r.frequency);
     if (r.customerId && r.routeName && !routeByCust.has(r.customerId)) routeByCust.set(r.customerId, r.routeName);
   }
-  // Fall back to the routes captured by the account-fetch automation (bi_customeraccounts.routes[]).
   const acctRouteByCust = new Map();
   const acctFreqByCust = new Map();
   for (const a of accts) {

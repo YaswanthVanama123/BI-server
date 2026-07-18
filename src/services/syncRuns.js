@@ -5,7 +5,6 @@ const logger = require('../utils/logger');
 const log = logger.child('sync-runs');
 const { SyncRun } = models;
 
-// Record the start of a background sync run; returns the doc id (or null if the DB write failed).
 async function recordStart(type, label) {
   try {
     const doc = await SyncRun.create({ type, label: label || type, status: 'running', startedAt: new Date() });
@@ -13,7 +12,6 @@ async function recordStart(type, label) {
   } catch (e) { log.warn(`recordStart failed: ${e.message}`); return null; }
 }
 
-// Mark a run finished (status 'done' or 'error') with a summary object.
 async function recordFinish(id, { status = 'done', summary, error } = {}) {
   if (!id) return;
   try {

@@ -27,7 +27,6 @@ async function ensureTenant(req) {
   return t;
 }
 
-// Closed-invoice "stops" for the range: route = technician = assignedTo (NRV1…). No customer/onRoute join.
 async function loadStops(req) {
   const db = getSourceDb();
   const from = clean(req.query.from);
@@ -63,7 +62,6 @@ async function loadStops(req) {
   return { stops, from, to, routeCode };
 }
 
-// GET /route-drive-time/options — route (technician) codes + date bounds from closed invoices.
 async function options(req, res) {
   const db = getSourceDb();
   const tenant = await ensureTenant(req);
@@ -82,9 +80,6 @@ async function options(req, res) {
   res.json(buildEnvelope({ routeCodes, earliestDate: dayKey(minDate), latestDate: dayKey(maxDate), pendingPairs: pending }));
 }
 
-// GET /route-drive-time?from=&to=&routeCode= — consecutive-stop legs per route (= technician) per day,
-// computed LIVE from closed invoices. Driving time joins bi_companydistances by company name; extra
-// (idle) = observed gap (next arrival − prev departure) − driving.
 async function routeDriveTime(req, res) {
   const tenant = await ensureTenant(req);
   const { stops, from, to, routeCode } = await loadStops(req);

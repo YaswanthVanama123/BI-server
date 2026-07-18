@@ -2,8 +2,6 @@
 const mongoose = require('mongoose');
 const { Schema, baseOptions } = require('./common');
 
-// One row per background sync run (customer account fetch, distances Mapbox sync, …). Powers the
-// Sync Status screen's history; in-progress runs are shown live from each job's in-memory snapshot.
 const syncRunSchema = new Schema({
   type: { type: String, required: true },
   label: { type: String },

@@ -2,8 +2,6 @@
 const mongoose = require('mongoose');
 const { Schema, baseOptions } = require('./common');
 
-// Per-invoice line-item service frequency, matched from the customer's pricing (item name + price).
-// Written going forward by the enrichment step; the inventory app's invoices are never modified.
 const lineSchema = new Schema({
   item: { type: String },
   description: { type: String },

@@ -1,8 +1,4 @@
 'use strict';
-// Match an invoice line item to a customer pricing row and return that row's service frequency
-// (Weekly / Bi-Weekly / Monthly / Quarterly…). Pricing item names carry a category prefix
-// ("Restroom Sani:400-W Restroom & Hygiene") while invoice lines don't ("400-W Restroom & Hygiene"),
-// so compare on the part after the last colon; among name matches prefer the one whose price matches.
 const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
 function itemKey(s) { const t = norm(s); const i = t.lastIndexOf(':'); return i >= 0 ? t.slice(i + 1).trim() : t; }
 

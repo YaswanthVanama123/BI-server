@@ -13,8 +13,6 @@ function toMinutes(s) {
   if (m[3] === 'AM' && h === 12) h = 0;
   return h * 60 + mi;
 }
-// RouteStar arrival/departure are full date-times ("06/24/2026 9:03 AM"). Parse to an epoch (ms) so span
-// and gaps are correct even across a real date boundary. Falls back to time-of-day on the invoice's day.
 function parseTs(str, dk) {
   const s = clean(str);
   if (!s) return null;
@@ -50,10 +48,6 @@ async function options(req, res) {
   res.json(buildEnvelope({ routes, latestDate: dayKey(maxDate), earliestDate: dayKey(minDate) }));
 }
 
-// GET /checkins?from=&to=&route= — check-in/out grouped by ROUTE = technician = the invoice's assignedTo
-// (NRV1…) + day. Day span = last departure − first arrival that day; idle = sum of gaps between
-// consecutive stops (next arrival − prev departure); service = on-site (departure − arrival) per stop;
-// service% = service ÷ day span.
 async function checkins(req, res) {
   const db = getSourceDb();
   const from = clean(req.query.from) || clean(req.query.date);

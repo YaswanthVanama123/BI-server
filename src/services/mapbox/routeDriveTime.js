@@ -114,8 +114,6 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
       }
     }
   }
-  // Rebuild legs cleanly: drop existing legs for the scope first so stale routeCodes (e.g. old
-  // onRoute-based values) can't linger — routeCode is part of the unique key, so upsert alone orphans them.
   const delFilter = { tenantId: tenant._id };
   if (from || to) delFilter.dateKey = { ...(from ? { $gte: from } : {}), ...(to ? { $lte: to } : {}) };
   await RouteDriveLeg.deleteMany(delFilter);
