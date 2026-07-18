@@ -44,12 +44,12 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
     and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
   }
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
+    .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .limit(50000).toArray();
 
   const custIds = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
   const custs = await db.collection('routestarcustomers')
-    .find({ customerId: { $in: custIds } }, { projection: { customerId: 1, latitude: 1, longitude: 1, onRoute: 1 } }).toArray();
+    .find({ customerId: { $in: custIds } }, { projection: { customerId: 1, latitude: 1, longitude: 1 } }).toArray();
   const custMap = new Map(custs.map((c) => [c.customerId, c]));
 
   const stops = [];
@@ -60,7 +60,7 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
     if (!dk) continue;
     stops.push({
       invoiceNumber: inv.invoiceNumber, dateKey: dk,
-      routeCode: (cust && clean(cust.onRoute)) ? String(cust.onRoute).trim().toUpperCase() : '(no route)',
+      routeCode: clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)',
       customerId: cid, customer: (inv.customer && inv.customer.name) || '',
       arrMin: toMinutes(inv.arrivalTime), depMin: toMinutes(inv.departureTime),
       arrival: clean(inv.arrivalTime), departure: clean(inv.departureTime),
@@ -114,6 +114,11 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
       }
     }
   }
+  // Rebuild legs cleanly: drop existing legs for the scope first so stale routeCodes (e.g. old
+  // onRoute-based values) can't linger — routeCode is part of the unique key, so upsert alone orphans them.
+  const delFilter = { tenantId: tenant._id };
+  if (from || to) delFilter.dateKey = { ...(from ? { $gte: from } : {}), ...(to ? { $lte: to } : {}) };
+  await RouteDriveLeg.deleteMany(delFilter);
   await bulkInChunks(RouteDriveLeg, legOps);
   if (registerPairs) await bulkInChunks(CompanyDistance, pairOps);
   return { legs: legOps.length, pairs: pairOps.length, groups: groups.size };

@@ -16,7 +16,6 @@ function toMinutes(s) {
   return h * 60 + mi;
 }
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
-function customerIdFromLink(link) { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; }
 function bucketKey(dk, g) {
   if (!dk) return null;
   if (g === 'day') return dk;
@@ -30,7 +29,7 @@ async function loadStops(req) {
   const db = getSourceDb();
   const from = clean(req.query.from);
   const to = clean(req.query.to);
-  const routeCode = clean(req.query.routeCode);
+  const routeCode = (clean(req.query.routeCode) || '').toUpperCase() || undefined;
 
   const and = [CLOSED];
   if (from || to) {
@@ -39,25 +38,20 @@ async function loadStops(req) {
     and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
   }
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
+    .find({ $and: and }, { projection: { assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .limit(50000).toArray();
-
-  const custIds = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
-  const custs = await db.collection('routestarcustomers')
-    .find({ customerId: { $in: custIds } }, { projection: { customerId: 1, onRoute: 1 } }).toArray();
-  const routeByCust = new Map(custs.map((c) => [c.customerId, (clean(c.onRoute) ? String(c.onRoute).trim().toUpperCase() : null)]));
 
   const stops = [];
   for (const inv of invoices) {
     const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
-    const cid = customerIdFromLink(inv.customer && inv.customer.link);
-    const rc = (cid && routeByCust.get(cid)) || '(no route)';
+    // Route = technician = the invoice's assignedTo (NRV1…).
+    const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
     if (routeCode && rc !== routeCode) continue;
     const arr = toMinutes(inv.arrivalTime);
     const dep = toMinutes(inv.departureTime);
     stops.push({
-      technician: clean(inv.assignedTo) || '(unassigned)',
+      technician: rc,
       routeCode: rc, dateKey: dk,
       arr, dep,
       service: (arr != null && dep != null && dep >= arr) ? dep - arr : null,

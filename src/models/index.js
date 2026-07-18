@@ -13,6 +13,7 @@ const governance = require('./governance.models');
 const analytics = require('./analytics.models');
 const customerAccount = require('./customerAccount.models');
 const sync = require('./sync.models');
+const invoiceFrequency = require('./invoiceFrequency.models');
 
 const models = {
   Tenant,
@@ -27,6 +28,7 @@ const models = {
   ...analytics,
   ...customerAccount,
   ...sync,
+  ...invoiceFrequency,
 };
 
 async function syncIndexes() {

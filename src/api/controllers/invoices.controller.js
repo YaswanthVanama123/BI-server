@@ -1,8 +1,12 @@
 'use strict';
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
+const { models } = require('../../models');
+const { frequencyFor } = require('../../services/pricingMatch');
 
+const { CustomerAccount, InvoiceFrequency } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
+const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
 const LIMIT = 2000;
 
 async function closedInvoices(req, res) {
@@ -42,6 +46,21 @@ async function invoiceDetail(req, res) {
   if (!d) { const e = new Error(`Invoice ${req.params.invoiceNumber} not found`); e.status = 404; e.code = 'NOT_FOUND'; throw e; }
   const cust = d.customer || {};
   const det = d.invoiceDetails || {};
+
+  // Frequency per line item: prefer the stored enrichment; else match live against the customer's pricing.
+  const cid = customerIdFromLink(cust.link);
+  const [stored, acct] = await Promise.all([
+    InvoiceFrequency.findOne({ invoiceNumber: d.invoiceNumber }).lean(),
+    cid ? CustomerAccount.findOne({ customerId: cid }, { pricing: 1 }).lean() : null,
+  ]);
+  const pricing = (acct && acct.pricing) || [];
+  const storedByKey = new Map((stored && stored.lines ? stored.lines : []).map((l) => [`${l.item}||${l.rate}`, l.frequency]));
+  const freqFor = (li) => {
+    const k = `${clean(li.name) || ''}||${Number(li.rate || 0)}`;
+    if (storedByKey.has(k)) return storedByKey.get(k) || null;
+    return frequencyFor(li, pricing);
+  };
+
   res.json(buildEnvelope({
     invoiceNumber: d.invoiceNumber,
     invoiceDate: d.invoiceDate,
@@ -70,6 +89,7 @@ async function invoiceDetail(req, res) {
       quantity: Number(li.quantity || 0),
       rate: Number(li.rate || 0),
       amount: Number(li.amount || 0),
+      frequency: freqFor(li),
       class: clean(li.class) || null,
       warehouse: clean(li.warehouse) || null,
       taxCode: clean(li.taxCode) || null,

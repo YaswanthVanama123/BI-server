@@ -19,7 +19,6 @@ function toMinutes(s) {
   return h * 60 + mi;
 }
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
-function customerIdFromLink(link) { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; }
 
 function bucketKey(dk, granularity) {
   if (!dk) return null;
@@ -40,13 +39,11 @@ async function ensureTenantId(req) {
   return t ? t._id : null;
 }
 
-// GET /service-vs-drive-time?from=&to=&routeCode=&granularity= — on-site service time vs Mapbox drive time
-// vs non-driving idle gap, computed from closed invoices + the stored company-distance drive times.
 async function serviceVsDriveTime(req, res) {
   const db = getSourceDb();
   const from = clean(req.query.from);
   const to = clean(req.query.to);
-  const routeCode = clean(req.query.routeCode);
+  const routeCode = (clean(req.query.routeCode) || '').toUpperCase() || undefined;
   const granularity = ['day', 'week', 'month'].includes(req.query.granularity) ? req.query.granularity : 'month';
 
   const and = [CLOSED];
@@ -59,22 +56,16 @@ async function serviceVsDriveTime(req, res) {
     .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .limit(50000).toArray();
 
-  const custIds = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
-  const custs = await db.collection('routestarcustomers')
-    .find({ customerId: { $in: custIds } }, { projection: { customerId: 1, onRoute: 1 } }).toArray();
-  const routeByCust = new Map(custs.map((c) => [c.customerId, (clean(c.onRoute) ? String(c.onRoute).trim().toUpperCase() : null)]));
-
   const stops = [];
   for (const inv of invoices) {
     const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
-    const cid = customerIdFromLink(inv.customer && inv.customer.link);
-    const rc = (cid && routeByCust.get(cid)) || '(no route)';
+    const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
     if (routeCode && rc !== routeCode) continue;
     const arr = toMinutes(inv.arrivalTime);
     const dep = toMinutes(inv.departureTime);
     stops.push({
-      technician: clean(inv.assignedTo) || '(unassigned)',
+      technician: rc,
       routeCode: rc,
       dateKey: dk,
       customer: (inv.customer && inv.customer.name) || '',
@@ -99,6 +90,7 @@ async function serviceVsDriveTime(req, res) {
   const bucketMap = new Map();
   const routeMap = new Map();
   const techMap = new Map();
+  const routeDayMap = new Map();
   const bump = (map, key, seed, add) => { const cur = map.get(key) || seed(); add(cur); map.set(key, cur); };
   const seed = (extra) => () => ({ service: 0, drive: 0, idle: 0, stops: 0, legs: 0, ...extra });
 
@@ -120,9 +112,9 @@ async function serviceVsDriveTime(req, res) {
     }
     days.add(s.dateKey);
     techDays.add(`${s.technician}||${s.dateKey}`);
+    bump(routeDayMap, `${s.routeCode}||${s.dateKey}`, seed({ routeCode: s.routeCode, date: s.dateKey }), (o) => { if (s.service != null) o.service += s.service; o.stops += 1; });
   }
 
-  // Legs = consecutive stops of the SAME technician on the SAME day, ordered by arrival.
   const byTechDay = new Map();
   for (const s of stops) { const k = `${s.technician}||${s.dateKey}`; if (!byTechDay.has(k)) byTechDay.set(k, []); byTechDay.get(k).push(s); }
   for (const arr of byTechDay.values()) {
@@ -143,6 +135,7 @@ async function serviceVsDriveTime(req, res) {
         bump(bucketMap, b, seed({ bucket: b }), (o) => { o.drive += drive; o.idle += idle; o.legs += 1; });
         bump(routeMap, cur.routeCode, seed({ routeCode: cur.routeCode }), (o) => { o.drive += drive; o.idle += idle; o.legs += 1; });
         bump(techMap, cur.technician, seed({ technician: cur.technician }), (o) => { o.drive += drive; o.idle += idle; o.legs += 1; });
+        bump(routeDayMap, `${cur.routeCode}||${cur.dateKey}`, seed({ routeCode: cur.routeCode, date: cur.dateKey }), (o) => { o.drive += drive; o.idle += idle; o.legs += 1; });
       }
     }
   }
@@ -153,6 +146,10 @@ async function serviceVsDriveTime(req, res) {
   const series = fix([...bucketMap.values()], 'bucket').sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
   const byRoute = fix([...routeMap.values()], 'routeCode').sort((a, b) => (b.service + b.drive) - (a.service + a.drive));
   const byTechnician = fix([...techMap.values()], 'technician').sort((a, b) => (b.service + b.drive) - (a.service + a.drive));
+  const byRouteDay = [...routeDayMap.values()].map((o) => {
+    const act = o.service + o.drive + o.idle;
+    return { routeCode: o.routeCode, date: o.date, service: round(o.service), drive: round(o.drive), idle: round(o.idle), stops: o.stops, legs: o.legs, servicePct: act ? round((o.service / act) * 100, 1) : 0 };
+  }).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(a.routeCode).localeCompare(String(b.routeCode)));
 
   const stopCount = stops.length;
   const active = totalService + totalDrive + totalIdle;
@@ -172,7 +169,7 @@ async function serviceVsDriveTime(req, res) {
     avgDrivePerLeg: syncedLegs ? round(totalDrive / syncedLegs, 1) : 0,
   };
 
-  res.json(buildEnvelope({ kpis, series, byRoute, byTechnician }, {
+  res.json(buildEnvelope({ kpis, series, byRoute, byTechnician, byRouteDay }, {
     meta: { source: 'inventory_db + bi_companydistances', from: from || null, to: to || null, routeCode: routeCode || null, granularity, unsyncedLegs: legs - syncedLegs },
   }));
 }

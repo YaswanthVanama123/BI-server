@@ -19,6 +19,7 @@
     "import:payroll": "node scripts/import-payroll.js",
     "compute:legs": "node scripts/compute-route-legs.js",
     "drive:sync": "node scripts/compute-drive-time.js",
+    "enrich:frequencies": "node scripts/enrich-invoice-frequencies.js",
     "distances:inspect": "node scripts/inspect-mapdistance.js",
     "materialize": "node scripts/rebuild-summaries.js",
     "check": "for f in $(find src scripts -name '*.js'); do node --check \"$f\"; done && echo ok",
