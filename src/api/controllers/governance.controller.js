@@ -2,6 +2,7 @@
 const { models } = require('../../models');
 const { parseFilters } = require('../lib/filters');
 const { buildEnvelope } = require('../lib/envelope');
+const { getPaging, pageMeta } = require('../lib/pagination');
 
 const {
   DataQualityIssue, InvoiceLineItem, ServiceCategory, ItemCategoryMapping, ImportBatch, SourceSyncState, SyncRun,
@@ -9,14 +10,24 @@ const {
 const accountJob = require('../../services/routestar/accountSyncJob');
 const distancesJob = require('../../services/mapbox/syncJob');
 
+const SYNC_TTL_MS = 15000;
+const syncDbCache = new Map();
+
 async function dqIssues(req, res) {
   const q = { tenantId: req.tenantId };
   if (req.query.severity && req.query.severity !== 'all') q.severity = req.query.severity;
   if (req.query.resolutionStatus && req.query.resolutionStatus !== 'all') q.resolutionStatus = req.query.resolutionStatus;
   if (req.query.issueType) q.issueType = req.query.issueType;
-  const rows = await DataQualityIssue.find(q).sort({ detectedAt: -1 }).limit(2000).lean();
-  const openCritical = rows.filter((r) => r.severity === 'critical' && r.resolutionStatus === 'open').length;
-  res.json(buildEnvelope(rows, { meta: { dataQuality: { openCriticalIssues: openCritical } } }));
+  const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 500 });
+  const [total, rows, openCritical] = await Promise.all([
+    DataQualityIssue.countDocuments(q),
+    DataQualityIssue.find(q).sort({ detectedAt: -1 }).skip(paging.skip).limit(paging.limit).lean(),
+    DataQualityIssue.countDocuments({ ...q, severity: 'critical', resolutionStatus: 'open' }),
+  ]);
+  res.json(buildEnvelope(rows, {
+    meta: { dataQuality: { openCriticalIssues: openCritical }, total },
+    page: pageMeta(total, paging, rows.length),
+  }));
 }
 
 async function resolveDqIssue(req, res) {
@@ -61,8 +72,12 @@ async function createMapping(req, res) {
 async function importBatches(req, res) {
   const q = { tenantId: req.tenantId };
   if (req.query.sourceSystem) q.sourceSystem = req.query.sourceSystem;
-  const rows = await ImportBatch.find(q).sort({ startedAt: -1 }).limit(500).lean();
-  res.json(buildEnvelope(rows));
+  const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 500 });
+  const [total, rows] = await Promise.all([
+    ImportBatch.countDocuments(q),
+    ImportBatch.find(q).sort({ startedAt: -1 }).skip(paging.skip).limit(paging.limit).lean(),
+  ]);
+  res.json(buildEnvelope(rows, { meta: { total }, page: pageMeta(total, paging, rows.length) }));
 }
 
 async function syncStatus(req, res) {
@@ -83,17 +98,26 @@ async function syncStatus(req, res) {
   }
 
   let history = [];
-  try {
-    history = await SyncRun.find({}).sort({ startedAt: -1 }).limit(50).lean();
-  } catch { history = []; }
-  history = history.map((h) => ({
-    type: h.type, label: h.label || h.type, status: h.status,
-    startedAt: h.startedAt, finishedAt: h.finishedAt || null,
-    durationMs: h.durationMs != null ? h.durationMs : null,
-    summary: h.summary || null, error: h.error || null,
-  }));
-
-  const watermarks = req.tenantId ? await SourceSyncState.find({ tenantId: req.tenantId }).lean() : [];
+  const wmKey = String(req.tenantId || 'default');
+  const hit = syncDbCache.get(wmKey);
+  const anyRunning = running.length > 0;
+  let watermarks = [];
+  if (hit && !anyRunning && Date.now() - hit.at < SYNC_TTL_MS) {
+    history = hit.history;
+    watermarks = hit.watermarks;
+  } else {
+    try {
+      history = await SyncRun.find({}).sort({ startedAt: -1 }).limit(50).lean();
+    } catch { history = []; }
+    history = history.map((h) => ({
+      type: h.type, label: h.label || h.type, status: h.status,
+      startedAt: h.startedAt, finishedAt: h.finishedAt || null,
+      durationMs: h.durationMs != null ? h.durationMs : null,
+      summary: h.summary || null, error: h.error || null,
+    }));
+    watermarks = req.tenantId ? await SourceSyncState.find({ tenantId: req.tenantId }).lean() : [];
+    syncDbCache.set(wmKey, { at: Date.now(), history, watermarks });
+  }
 
   res.json(buildEnvelope({ running, history, watermarks }, { meta: { generatedAt: new Date().toISOString() } }));
 }

@@ -24,22 +24,38 @@ const categoryOf = (item) => { const s = clean(item) || ''; return s.includes(':
 const labelOf = (item) => { const s = clean(item) || ''; const i = s.lastIndexOf(':'); return ((i >= 0 ? s.slice(i + 1) : s).trim()) || 'Uncategorized'; };
 const primaryRoute = (routes) => { for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) return String(rc).trim().toUpperCase(); } return null; };
 
-function dateRange(req) {
-  const from = clean(req.query.from);
-  const to = clean(req.query.to);
+function buildAnd(from, to) {
   const and = [CLOSED];
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
     and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
   }
-  return { and, from, to };
+  return and;
+}
+function parseParams(req) {
+  return {
+    from: clean(req.query.from),
+    to: clean(req.query.to),
+    routeCode: (clean(req.query.routeCode) || '').toUpperCase() || undefined,
+  };
 }
 
-async function loadReconciliation(req) {
+const TTL_MS = 300000;
+function makeCache() {
+  const m = new Map();
+  return {
+    get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 300) m.delete(m.keys().next().value); },
+  };
+}
+const reconCache = makeCache();
+const rawInvCache = makeCache();
+const payloadCache = makeCache();
+
+async function computeReconciliation(from, to, routeCode) {
   const db = getSourceDb();
-  const routeCode = (clean(req.query.routeCode) || '').toUpperCase() || undefined;
-  const { and, from, to } = dateRange(req);
+  const and = buildAnd(from, to);
 
   const accts = await CustomerAccount.find({}, { customerId: 1, customerName: 1, company: 1, pricing: 1, routes: 1 }).lean();
   const cust = new Map();
@@ -62,7 +78,8 @@ async function loadReconciliation(req) {
   }
 
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1, lineItems: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1, lineItems: 1 } })
+    .batchSize(5000)
     .limit(50000).toArray();
   for (const inv of invoices) {
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
@@ -92,6 +109,28 @@ async function loadReconciliation(req) {
   return { records, routeCode, from, to };
 }
 
+async function getReconciliation(from, to, routeCode) {
+  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = reconCache.get(key);
+  if (cached) return cached;
+  const v = await computeReconciliation(from, to, routeCode);
+  reconCache.set(key, v);
+  return v;
+}
+
+async function getClosedInvoiceLines(from, to) {
+  const key = `${from || ''}|${to || ''}`;
+  const cached = rawInvCache.get(key);
+  if (cached) return cached;
+  const db = getSourceDb();
+  const invoices = await db.collection('routestarinvoices')
+    .find({ $and: buildAnd(from, to) }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, lineItems: 1 } })
+    .batchSize(5000)
+    .limit(50000).toArray();
+  rawInvCache.set(key, invoices);
+  return invoices;
+}
+
 function itemRows(r) {
   const keys = new Set([...r.expByItem.keys(), ...r.actByItem.keys()]);
   const rows = [];
@@ -117,31 +156,49 @@ function totals(records) {
 }
 
 async function byCustomer(req, res) {
-  const { records, routeCode } = await loadReconciliation(req);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `cust|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const { records } = await getReconciliation(from, to, routeCode);
   const rows = records.map((r) => ({
     customerId: r.customerId, customer: r.customer, routeCode: r.route,
     expected: round(r.expected), invoiced: round(r.actual), remaining: round(r.expected - r.actual),
     pct: r.expected ? round((r.actual / r.expected) * 100, 1) : null, invoices: r.invoices.length,
   })).sort((a, b) => b.invoiced - a.invoiced);
   const t = totals(records);
-  res.json(buildEnvelope({ kpis: { ...t, customers: rows.length }, rows }, { meta: { source: 'pricing (expected) + invoices (actual)', routeCode: routeCode || null } }));
+  const payload = buildEnvelope({ kpis: { ...t, customers: rows.length }, rows }, { meta: { source: 'pricing (expected) + invoices (actual)', routeCode: routeCode || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 async function customerDetail(req, res) {
-  const { records } = await loadReconciliation(req);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `cd|${req.params.id}|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const { records } = await getReconciliation(from, to, routeCode);
   const r = records.find((x) => x.customerId === req.params.id);
   if (!r) { const e = new Error(`Customer ${req.params.id} not found in range`); e.status = 404; e.code = 'NOT_FOUND'; throw e; }
-  res.json(buildEnvelope({
+  const payload = buildEnvelope({
     customerId: r.customerId, customer: r.customer, routeCode: r.route,
     expected: round(r.expected), invoiced: round(r.actual), remaining: round(r.expected - r.actual),
     pct: r.expected ? round((r.actual / r.expected) * 100, 1) : null,
     items: itemRows(r),
-    invoices: r.invoices.sort((a, b) => String(b.date).localeCompare(String(a.date))),
-  }));
+    invoices: r.invoices.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))),
+  });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 async function byCategory(req, res) {
-  const { records, routeCode } = await loadReconciliation(req);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `cat|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const { records } = await getReconciliation(from, to, routeCode);
   const map = new Map();
   for (const r of records) {
     for (const [k, e] of r.expByItem) { const o = map.get(k) || { category: e.item, expected: 0, invoiced: 0 }; o.expected += e.expected; map.set(k, o); }
@@ -150,21 +207,24 @@ async function byCategory(req, res) {
   const t = totals(records);
   const rows = [...map.values()].map((o) => ({ category: o.category, expected: round(o.expected), invoiced: round(o.invoiced), remaining: round(o.expected - o.invoiced), pct: o.expected ? round((o.invoiced / o.expected) * 100, 1) : null }))
     .sort((a, b) => b.invoiced - a.invoiced);
-  res.json(buildEnvelope({ kpis: { ...t, categories: rows.length }, rows }, { meta: { source: 'pricing + invoices', routeCode: routeCode || null } }));
+  const payload = buildEnvelope({ kpis: { ...t, categories: rows.length }, rows }, { meta: { source: 'pricing + invoices', routeCode: routeCode || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 async function categoryDetail(req, res) {
   const name = clean(req.query.name);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `cdt|${name || ''}|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+
   const wantKey = itemKey(name);
-  const { records } = await loadReconciliation(req);
+  const [{ records }, invoices] = await Promise.all([getReconciliation(from, to, routeCode), getClosedInvoiceLines(from, to)]);
   const custRows = [];
   const invoiceRows = [];
-  const db = getSourceDb();
-  const { and } = dateRange(req);
-  const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, lineItems: 1 } })
-    .limit(50000).toArray();
-  const wantRoute = (req.query.routeCode || '').toUpperCase();
+  const wantRoute = (routeCode || '').toUpperCase();
   const custRoute = new Map(records.map((r) => [r.customerId, r.route]));
   for (const inv of invoices) {
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
@@ -182,11 +242,18 @@ async function categoryDetail(req, res) {
   }
   custRows.sort((a, b) => b.invoiced - a.invoiced);
   invoiceRows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
-  res.json(buildEnvelope({ category: name, customers: custRows, invoices: invoiceRows }));
+  const payload = buildEnvelope({ category: name, customers: custRows, invoices: invoiceRows });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 async function byRoute(req, res) {
-  const { records } = await loadReconciliation(req);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `rt|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const { records } = await getReconciliation(from, to, routeCode);
   const map = new Map();
   for (const r of records) {
     const o = map.get(r.route) || { routeCode: r.route, expected: 0, invoiced: 0, stops: 0, customers: 0 };
@@ -195,11 +262,18 @@ async function byRoute(req, res) {
   const t = totals(records);
   const rows = [...map.values()].map((o) => ({ routeCode: o.routeCode, expected: round(o.expected), invoiced: round(o.invoiced), remaining: round(o.expected - o.invoiced), stops: o.stops, customers: o.customers, pct: o.expected ? round((o.invoiced / o.expected) * 100, 1) : null }))
     .sort((a, b) => b.invoiced - a.invoiced);
-  res.json(buildEnvelope({ kpis: { ...t, routes: rows.length }, rows }));
+  const payload = buildEnvelope({ kpis: { ...t, routes: rows.length }, rows });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 async function perStop(req, res) {
-  const { records } = await loadReconciliation(req);
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `stop|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const { records } = await getReconciliation(from, to, routeCode);
   const map = new Map();
   let invoiced = 0; let stops = 0; let expected = 0;
   for (const r of records) {
@@ -211,7 +285,50 @@ async function perStop(req, res) {
     .sort((a, b) => b.revenuePerStop - a.revenuePerStop);
   const topCustomers = records.map((r) => ({ customerId: r.customerId, customer: r.customer, routeCode: r.route, invoiced: round(r.actual), stops: r.invoices.length, revenuePerStop: r.invoices.length ? round(r.actual / r.invoices.length, 2) : 0 }))
     .sort((a, b) => b.invoiced - a.invoiced).slice(0, 50);
-  res.json(buildEnvelope({ kpis: { invoiced: round(invoiced), expected: round(expected), remaining: round(expected - invoiced), stops, revenuePerStop: stops ? round(invoiced / stops, 2) : 0, routes: byRouteRows.length }, byRoute: byRouteRows, byCustomer: topCustomers }));
+  const payload = buildEnvelope({ kpis: { invoiced: round(invoiced), expected: round(expected), remaining: round(expected - invoiced), stops, revenuePerStop: stops ? round(invoiced / stops, 2) : 0, routes: byRouteRows.length }, byRoute: byRouteRows, byCustomer: topCustomers });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
-module.exports = { byCategory, categoryDetail, byRoute, byCustomer, customerDetail, perStop };
+function commonRanges() {
+  const d = new Date();
+  const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  const today = iso(d);
+  const week = new Date(d); week.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return [
+    { from: `${d.getFullYear()}-01-01`, to: today },
+    { from: iso(new Date(d.getFullYear(), d.getMonth(), 1)), to: today },
+    { from: iso(new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)), to: today },
+    { from: iso(week), to: today },
+  ];
+}
+
+const fakeReq = (from, to) => ({ query: { from, to }, params: {} });
+const fakeRes = () => ({ set() {}, json() {} });
+
+let warming = false;
+async function warm() {
+  if (warming) return;
+  warming = true;
+  try {
+    for (const r of commonRanges()) {
+      try {
+        await getReconciliation(r.from, r.to, undefined);
+        await Promise.all([
+          byCategory(fakeReq(r.from, r.to), fakeRes()),
+          byRoute(fakeReq(r.from, r.to), fakeRes()),
+          byCustomer(fakeReq(r.from, r.to), fakeRes()),
+          perStop(fakeReq(r.from, r.to), fakeRes()),
+        ]);
+      } catch (e) { /* db not ready yet */ }
+    }
+  } finally { warming = false; }
+}
+
+function startWarmer() {
+  setTimeout(() => { warm(); }, 5000);
+  setInterval(() => { warm(); }, TTL_MS - 30000);
+}
+
+module.exports = { byCategory, categoryDetail, byRoute, byCustomer, customerDetail, perStop, warm, startWarmer };

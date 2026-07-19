@@ -27,12 +27,24 @@ async function ensureTenant(req) {
   return t;
 }
 
-async function loadStops(req) {
-  const db = getSourceDb();
-  const from = clean(req.query.from);
-  const to = clean(req.query.to);
-  const routeCode = (clean(req.query.routeCode) || '').toUpperCase() || undefined;
+const TTL_MS = 300000;
+function makeCache() {
+  const m = new Map();
+  return {
+    get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 300) m.delete(m.keys().next().value); },
+  };
+}
+const stopsCache = makeCache();
+const pairCache = makeCache();
+const payloadCache = makeCache();
 
+async function getStops(from, to, routeCode) {
+  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = stopsCache.get(key);
+  if (cached) return cached;
+
+  const db = getSourceDb();
   const and = [CLOSED];
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
@@ -40,7 +52,8 @@ async function loadStops(req) {
     and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
   }
   const docs = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
+    .batchSize(5000)
     .limit(50000).toArray();
 
   const stops = [];
@@ -59,10 +72,30 @@ async function loadStops(req) {
       depMin: toMinutes(d.departureTime),
     });
   }
-  return { stops, from, to, routeCode };
+  stopsCache.set(key, stops);
+  return stops;
+}
+
+async function getPairByName(tenantId) {
+  const key = String(tenantId || 'default');
+  const cached = pairCache.get(key);
+  if (cached) return cached;
+  const byName = new Map();
+  const pairs = await CompanyDistance.find(
+    { tenantId, drivingMinutes: { $ne: null } },
+    { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 },
+  ).lean();
+  for (const p of pairs) {
+    const nk = `${normName(p.fromCompany)}||${normName(p.toCompany)}`;
+    if (!byName.has(nk)) byName.set(nk, p);
+  }
+  pairCache.set(key, byName);
+  return byName;
 }
 
 async function options(req, res) {
+  const cached = payloadCache.get('options');
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
   const db = getSourceDb();
   const tenant = await ensureTenant(req);
   const [routesRaw, agg, pending] = await Promise.all([
@@ -77,23 +110,13 @@ async function options(req, res) {
   const md = agg[0] || {};
   const maxDate = [md.maxC, md.maxI].filter(Boolean).sort().pop();
   const minDate = [md.minC, md.minI].filter(Boolean).sort()[0];
-  res.json(buildEnvelope({ routeCodes, earliestDate: dayKey(minDate), latestDate: dayKey(maxDate), pendingPairs: pending }));
+  const payload = buildEnvelope({ routeCodes, earliestDate: dayKey(minDate), latestDate: dayKey(maxDate), pendingPairs: pending });
+  payloadCache.set('options', payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
-async function routeDriveTime(req, res) {
-  const tenant = await ensureTenant(req);
-  const { stops, from, to, routeCode } = await loadStops(req);
-
-  const pairs = await CompanyDistance.find(
-    { tenantId: tenant._id, drivingMinutes: { $ne: null } },
-    { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 },
-  ).lean();
-  const byName = new Map();
-  for (const p of pairs) {
-    const nk = `${normName(p.fromCompany)}||${normName(p.toCompany)}`;
-    if (!byName.has(nk)) byName.set(nk, p);
-  }
-
+function buildPayload(stops, byName, from, to, routeCode) {
   const groups = new Map();
   for (const s of stops) {
     const k = `${s.routeCode}||${s.dateKey}`;
@@ -137,7 +160,60 @@ async function routeDriveTime(req, res) {
   }).filter((g) => g.legCount > 0)
     .sort((a, b) => (b.date || '').localeCompare(a.date || '') || String(a.routeCode).localeCompare(b.routeCode));
 
-  res.json(buildEnvelope(data, { meta: { source: 'inventory_db + bi_companydistances', from: from || null, to: to || null, routeCode: routeCode || null } }));
+  return buildEnvelope(data, { meta: { source: 'inventory_db + bi_companydistances', from: from || null, to: to || null, routeCode: routeCode || null } });
 }
 
-module.exports = { options, routeDriveTime };
+async function routeDriveTime(req, res) {
+  const from = clean(req.query.from);
+  const to = clean(req.query.to);
+  const routeCode = (clean(req.query.routeCode) || '').toUpperCase() || undefined;
+
+  const pkey = `rdt|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+
+  const tenant = await ensureTenant(req);
+  const [stops, byName] = await Promise.all([getStops(from, to, routeCode), getPairByName(tenant._id)]);
+  const payload = buildPayload(stops, byName, from, to, routeCode);
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
+}
+
+function commonRanges() {
+  const d = new Date();
+  const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  const today = iso(d);
+  const week = new Date(d); week.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return [
+    { from: `${d.getFullYear()}-01-01`, to: today },
+    { from: iso(new Date(d.getFullYear(), d.getMonth(), 1)), to: today },
+    { from: iso(new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)), to: today },
+    { from: iso(week), to: today },
+  ];
+}
+
+let warming = false;
+async function warm() {
+  if (warming) return;
+  warming = true;
+  try {
+    const env = require('../../config/env');
+    const t = await Tenant.findOne({ tenantCode: env.api.defaultTenantCode });
+    if (!t) return;
+    const byName = await getPairByName(t._id);
+    for (const r of commonRanges()) {
+      try {
+        const stops = await getStops(r.from, r.to, undefined);
+        payloadCache.set(`rdt|${r.from}|${r.to}|`, buildPayload(stops, byName, r.from, r.to, undefined));
+      } catch (e) { /* db not ready yet */ }
+    }
+  } catch (e) { /* ignore */ } finally { warming = false; }
+}
+
+function startWarmer() {
+  setTimeout(() => { warm(); }, 5000);
+  setInterval(() => { warm(); }, TTL_MS - 30000);
+}
+
+module.exports = { options, routeDriveTime, warm, startWarmer };

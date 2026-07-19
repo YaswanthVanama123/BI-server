@@ -13,7 +13,11 @@ async function count(db, name) {
   try { return await db.collection(name).estimatedDocumentCount(); } catch { return null; }
 }
 
+const TTL_MS = 15000;
+let cached = null;
+
 async function connections(req, res) {
+  if (cached && Date.now() - cached.at < TTL_MS) { res.set('X-Cache', 'HIT'); return res.json(cached.payload); }
   const sources = [];
 
   const primary = {
@@ -61,7 +65,10 @@ async function connections(req, res) {
   }
   sources.push(em);
 
-  res.json(buildEnvelope(sources, { meta: { generatedAt: new Date().toISOString() } }));
+  const payload = buildEnvelope(sources, { meta: { generatedAt: new Date().toISOString() } });
+  cached = { at: Date.now(), payload };
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
 }
 
 module.exports = { connections };

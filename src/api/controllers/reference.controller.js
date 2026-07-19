@@ -1,6 +1,7 @@
 'use strict';
 const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
+const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { startSync, snapshot } = require('../../services/routestar/accountSyncJob');
 const { dec } = require('./_dims');
@@ -59,8 +60,16 @@ async function customers(req, res) {
     frequency: freqByCust.get(c.customerId) || acctFreqByCust.get(c.customerId) || null,
   }));
   if (status) data = data.filter((r) => r.customerStatus === status);
+  const term = clean(req.query.q);
+  if (term) {
+    const t = term.toLowerCase();
+    data = data.filter((r) => `${r.customerName} ${r.routeCode || ''} ${r.routeStarAccountNumber || ''}`.toLowerCase().includes(t));
+  }
   data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
-  res.json(buildEnvelope(data, { meta: { source: 'inventory_db' }, page: { page: 1, pageSize: data.length, total: data.length } }));
+  const total = data.length;
+  const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 200 });
+  const pageRows = sliceArray(data, paging);
+  res.json(buildEnvelope(pageRows, { meta: { source: 'inventory_db', total }, page: pageMeta(total, paging, pageRows.length) }));
 }
 
 async function customerPricing(req, res) {

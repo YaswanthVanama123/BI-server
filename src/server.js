@@ -16,6 +16,13 @@ const server = app.listen(env.api.port, () => {
 connectDatabase().then(() => {
 
   require('./scheduler/dailyAccountFetch').start({ hour: 0, minute: 30 });
+  require('./api/controllers/checkins.controller').startWarmer();
+  require('./api/controllers/operationsAnalytics.controller').startWarmer();
+  require('./api/controllers/serviceVsDriveTime.controller').startWarmer();
+  require('./api/controllers/routeDriveTime.controller').startWarmer();
+  require('./api/controllers/companyDistance.controller').startWarmer();
+  require('./api/controllers/invoices.controller').startWarmer();
+  require('./api/controllers/revenue.controller').startWarmer();
 }).catch((e) => {
   log.warn(`MongoDB not connected (${e.message}).`);
   log.warn('Server is up; /api/v1 data endpoints return 503 until MONGODB_URI is reachable.');

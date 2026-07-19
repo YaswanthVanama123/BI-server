@@ -5,6 +5,31 @@ const { getSourceDb } = require('../../config/database');
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 
+const CHECKIN_PROJECTION = {
+  _id: 0,
+  invoiceNumber: 1,
+  assignedTo: 1,
+  dateCompleted: 1,
+  invoiceDate: 1,
+  arrivalTime: 1,
+  departureTime: 1,
+  elapsedTime: 1,
+  'customer.name': 1,
+};
+
+const TTL_MS = 300000;
+const cache = new Map();
+function cacheGet(key) {
+  const e = cache.get(key);
+  if (e && Date.now() - e.at < TTL_MS) return e.payload;
+  if (e) cache.delete(key);
+  return null;
+}
+function cacheSet(key, payload) {
+  cache.set(key, { at: Date.now(), payload });
+  if (cache.size > 200) cache.delete(cache.keys().next().value);
+}
+
 function toMinutes(s) {
   const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
   if (!m) return null;
@@ -33,6 +58,8 @@ function elapsedToMinutes(s) {
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
 async function options(req, res) {
+  const cached = cacheGet('options');
+  if (cached) return res.json(cached);
   const db = getSourceDb();
   const [routesRaw, agg] = await Promise.all([
     db.collection('routestarinvoices').distinct('assignedTo', CLOSED),
@@ -45,22 +72,24 @@ async function options(req, res) {
   const md = agg[0] || {};
   const maxDate = [md.maxC, md.maxI].filter(Boolean).sort().pop();
   const minDate = [md.minC, md.minI].filter(Boolean).sort()[0];
-  res.json(buildEnvelope({ routes, latestDate: dayKey(maxDate), earliestDate: dayKey(minDate) }));
+  const payload = buildEnvelope({ routes, latestDate: dayKey(maxDate), earliestDate: dayKey(minDate) });
+  cacheSet('options', payload);
+  res.json(payload);
 }
 
-async function checkins(req, res) {
+async function loadCheckins(from, to, route) {
   const db = getSourceDb();
-  const from = clean(req.query.from) || clean(req.query.date);
-  const to = clean(req.query.to) || clean(req.query.date) || from;
-  const route = (clean(req.query.route) || clean(req.query.routeCode) || '').toUpperCase() || undefined;
-
   const and = [CLOSED];
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
     and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
   }
-  const docs = await db.collection('routestarinvoices').find({ $and: and }).limit(50000).toArray();
+  const docs = await db.collection('routestarinvoices')
+    .find({ $and: and }, { projection: CHECKIN_PROJECTION })
+    .batchSize(5000)
+    .limit(50000)
+    .toArray();
 
   const stops = docs.map((d) => {
     const serviceDate = d.dateCompleted || d.invoiceDate;
@@ -131,7 +160,55 @@ async function checkins(req, res) {
     };
   }).sort((a, b) => (b.date || '').localeCompare(a.date || '') || String(a.route).localeCompare(b.route));
 
-  res.json(buildEnvelope(data, { meta: { source: 'inventory_db', from: from || null, to: to || null, route: route || null } }));
+  const payload = buildEnvelope(data, { meta: { source: 'inventory_db', from: from || null, to: to || null, route: route || null } });
+  return payload;
 }
 
-module.exports = { options, checkins };
+async function getCheckins(from, to, route) {
+  const key = `checkins|${from || ''}|${to || ''}|${route || ''}`;
+  const cached = cacheGet(key);
+  if (cached) return { payload: cached, hit: true };
+  const payload = await loadCheckins(from, to, route);
+  cacheSet(key, payload);
+  return { payload, hit: false };
+}
+
+async function checkins(req, res) {
+  const from = clean(req.query.from) || clean(req.query.date);
+  const to = clean(req.query.to) || clean(req.query.date) || from;
+  const route = (clean(req.query.route) || clean(req.query.routeCode) || '').toUpperCase() || undefined;
+  const { payload, hit } = await getCheckins(from, to, route);
+  res.set('X-Cache', hit ? 'HIT' : 'MISS');
+  res.json(payload);
+}
+
+function commonRanges() {
+  const d = new Date();
+  const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  const today = iso(d);
+  const week = new Date(d); week.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return [
+    { from: `${d.getFullYear()}-01-01`, to: today },
+    { from: iso(new Date(d.getFullYear(), d.getMonth(), 1)), to: today },
+    { from: iso(new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)), to: today },
+    { from: iso(week), to: today },
+  ];
+}
+
+let warming = false;
+async function warm() {
+  if (warming) return;
+  warming = true;
+  try {
+    for (const r of commonRanges()) {
+      try { await getCheckins(r.from, r.to, undefined); } catch (e) { /* db not ready yet */ }
+    }
+  } finally { warming = false; }
+}
+
+function startWarmer() {
+  setTimeout(() => { warm(); }, 5000);
+  setInterval(() => { warm(); }, TTL_MS - 30000);
+}
+
+module.exports = { options, checkins, warm, startWarmer };
