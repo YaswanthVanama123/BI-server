@@ -39,8 +39,8 @@ const stopsCache = makeCache();
 const pairCache = makeCache();
 const payloadCache = makeCache();
 
-async function getStops(from, to, routeCode) {
-  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
+async function getAllStops(from, to) {
+  const key = `${from || ''}|${to || ''}`;
   const cached = stopsCache.get(key);
   if (cached) return cached;
 
@@ -60,8 +60,9 @@ async function getStops(from, to, routeCode) {
   for (const d of docs) {
     const dk = dayKey(d.dateCompleted || d.invoiceDate);
     if (!dk) continue;
+    if (from && dk < from) continue;
+    if (to && dk > to) continue;
     const rc = clean(d.assignedTo) ? String(d.assignedTo).trim().toUpperCase() : '(unassigned)';
-    if (routeCode && rc !== routeCode) continue;
     stops.push({
       routeCode: rc, dateKey: dk,
       invoiceNumber: d.invoiceNumber,
@@ -74,6 +75,11 @@ async function getStops(from, to, routeCode) {
   }
   stopsCache.set(key, stops);
   return stops;
+}
+
+async function getStops(from, to, routeCode) {
+  const all = await getAllStops(from, to);
+  return routeCode ? all.filter((s) => s.routeCode === routeCode) : all;
 }
 
 async function getPairByName(tenantId) {

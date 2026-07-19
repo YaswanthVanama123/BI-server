@@ -42,8 +42,8 @@ function parseParams(req) {
   };
 }
 
-async function getStops(from, to, routeCode) {
-  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
+async function getAllStops(from, to) {
+  const key = `${from || ''}|${to || ''}`;
   const cached = stopsCache.get(key);
   if (cached) return cached;
 
@@ -63,8 +63,9 @@ async function getStops(from, to, routeCode) {
   for (const inv of invoices) {
     const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
+    if (from && dk < from) continue;
+    if (to && dk > to) continue;
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    if (routeCode && rc !== routeCode) continue;
     const arr = toMinutes(inv.arrivalTime);
     const dep = toMinutes(inv.departureTime);
     stops.push({
@@ -76,6 +77,11 @@ async function getStops(from, to, routeCode) {
   }
   stopsCache.set(key, stops);
   return stops;
+}
+
+async function getStops(from, to, routeCode) {
+  const all = await getAllStops(from, to);
+  return routeCode ? all.filter((s) => s.routeCode === routeCode) : all;
 }
 
 function perTechDay(stops) {

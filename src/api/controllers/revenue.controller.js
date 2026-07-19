@@ -53,7 +53,7 @@ const reconCache = makeCache();
 const rawInvCache = makeCache();
 const payloadCache = makeCache();
 
-async function computeReconciliation(from, to, routeCode) {
+async function computeReconciliation(from, to) {
   const db = getSourceDb();
   const and = buildAnd(from, to);
 
@@ -102,20 +102,21 @@ async function computeReconciliation(from, to, routeCode) {
     let route = '(unassigned)';
     if (r.routeCounts.size) route = [...r.routeCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
     else if (r.pricingRoute) route = r.pricingRoute;
-    if (routeCode && route !== routeCode) continue;
     r.route = route;
     if (r.expected > 0 || r.actual > 0) records.push(r);
   }
-  return { records, routeCode, from, to };
+  return { records, from, to };
 }
 
 async function getReconciliation(from, to, routeCode) {
-  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
-  const cached = reconCache.get(key);
-  if (cached) return cached;
-  const v = await computeReconciliation(from, to, routeCode);
-  reconCache.set(key, v);
-  return v;
+  const key = `${from || ''}|${to || ''}`;
+  let all = reconCache.get(key);
+  if (!all) {
+    all = await computeReconciliation(from, to);
+    reconCache.set(key, all);
+  }
+  const records = routeCode ? all.records.filter((r) => r.route === routeCode) : all.records;
+  return { records, routeCode, from, to };
 }
 
 async function getClosedInvoiceLines(from, to) {

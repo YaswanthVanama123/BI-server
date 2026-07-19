@@ -51,8 +51,8 @@ const stopsCache = makeCache();
 const pairCache = makeCache();
 const payloadCache = makeCache();
 
-async function getStops(from, to, routeCode) {
-  const key = `${from || ''}|${to || ''}|${routeCode || ''}`;
+async function getAllStops(from, to) {
+  const key = `${from || ''}|${to || ''}`;
   const cached = stopsCache.get(key);
   if (cached) return cached;
 
@@ -72,8 +72,9 @@ async function getStops(from, to, routeCode) {
   for (const inv of invoices) {
     const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
+    if (from && dk < from) continue;
+    if (to && dk > to) continue;
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    if (routeCode && rc !== routeCode) continue;
     const arr = toMinutes(inv.arrivalTime);
     const dep = toMinutes(inv.departureTime);
     stops.push({
@@ -87,6 +88,11 @@ async function getStops(from, to, routeCode) {
   }
   stopsCache.set(key, stops);
   return stops;
+}
+
+async function getStops(from, to, routeCode) {
+  const all = await getAllStops(from, to);
+  return routeCode ? all.filter((s) => s.routeCode === routeCode) : all;
 }
 
 async function getPairMap(tenantId) {
@@ -163,14 +169,14 @@ function buildPayload(stops, pairMap, from, to, routeCode, granularity) {
   }
 
   const fix = (arr, keyName) => arr.map((o) => ({
-    [keyName]: o[keyName], service: round(o.service), drive: round(o.drive), idle: round(o.idle), stops: o.stops, legs: o.legs,
+    [keyName]: o[keyName], service: round(o.service), drive: round(o.drive), idle: round(o.idle), gap: round(o.drive + o.idle), stops: o.stops, legs: o.legs,
   }));
   const series = fix([...bucketMap.values()], 'bucket').sort((a, b) => String(a.bucket).localeCompare(String(b.bucket)));
   const byRoute = fix([...routeMap.values()], 'routeCode').sort((a, b) => (b.service + b.drive) - (a.service + a.drive));
   const byTechnician = fix([...techMap.values()], 'technician').sort((a, b) => (b.service + b.drive) - (a.service + a.drive));
   const byRouteDay = [...routeDayMap.values()].map((o) => {
     const act = o.service + o.drive + o.idle;
-    return { routeCode: o.routeCode, date: o.date, service: round(o.service), drive: round(o.drive), idle: round(o.idle), stops: o.stops, legs: o.legs, servicePct: act ? round((o.service / act) * 100, 1) : 0 };
+    return { routeCode: o.routeCode, date: o.date, service: round(o.service), drive: round(o.drive), idle: round(o.idle), gap: round(o.drive + o.idle), stops: o.stops, legs: o.legs, servicePct: act ? round((o.service / act) * 100, 1) : 0 };
   }).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(a.routeCode).localeCompare(String(b.routeCode)));
 
   const stopCount = stops.length;
