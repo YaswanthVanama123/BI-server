@@ -43,7 +43,13 @@ function parseTs(str, dk) {
   if (!s) return null;
   if (/\d{1,4}[/-]\d{1,2}[/-]\d{1,4}/.test(s)) {
     const d = new Date(s);
-    if (!Number.isNaN(d.getTime())) return d.getTime();
+    if (!Number.isNaN(d.getTime())) {
+      if (!dk) return d.getTime();
+      const base = new Date(`${dk}T00:00:00`).getTime();
+      const diffDays = (d.getTime() - base) / 86400000;
+      if (diffDays >= -0.5 && diffDays <= 1.5) return d.getTime();
+      return null;
+    }
   }
   const mins = toMinutes(s);
   if (mins == null || !dk) return null;
