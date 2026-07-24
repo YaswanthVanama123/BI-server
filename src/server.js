@@ -23,6 +23,7 @@ connectDatabase().then(() => {
   require('./api/controllers/companyDistance.controller').startWarmer();
   require('./api/controllers/invoices.controller').startWarmer();
   require('./api/controllers/revenue.controller').startWarmer();
+  require('./api/controllers/reference.controller').startWarmer();
 }).catch((e) => {
   log.warn(`MongoDB not connected (${e.message}).`);
   log.warn('Server is up; /api/v1 data endpoints return 503 until MONGODB_URI is reachable.');

@@ -23,12 +23,23 @@ function mapStatus(c) {
   return 'active';
 }
 
-async function customers(req, res) {
+const TTL_MS = 300000;
+function makeCache(ttl) {
+  const m = new Map();
+  return {
+    get(k) { const e = m.get(k); if (e && Date.now() - e.at < ttl) return e.v; if (e) m.delete(k); return null; },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 20) m.delete(m.keys().next().value); },
+  };
+}
+const customersCache = makeCache(TTL_MS);
+
+async function getAllCustomers() {
+  const cached = customersCache.get('all');
+  if (cached) return cached;
   const db = getSourceDb();
-  const status = req.query.customerStatus && req.query.customerStatus !== 'all' ? req.query.customerStatus : null;
   const [docs, routeDocs, accts] = await Promise.all([
-    db.collection('routestarcustomers').find({}).limit(20000).toArray(),
-    db.collection('routestarcustomerroutes').find({}, { projection: { customerId: 1, frequency: 1, routeName: 1 } }).toArray(),
+    db.collection('routestarcustomers').find({}, { projection: { customerId: 1, accountNumber: 1, customerName: 1, company: 1, contact: 1, status: 1, active: 1, onRoute: 1 } }).batchSize(5000).limit(20000).toArray(),
+    db.collection('routestarcustomerroutes').find({}, { projection: { _id: 0, customerId: 1, frequency: 1, routeName: 1 } }).batchSize(5000).toArray(),
     CustomerAccount.find({}, { customerId: 1, routes: 1 }).lean(),
   ]);
   const freqByCust = new Map();
@@ -50,7 +61,7 @@ async function customers(req, res) {
     if (codes.size) acctRouteByCust.set(a.customerId, [...codes].join(', '));
     if (freq) acctFreqByCust.set(a.customerId, freq);
   }
-  let data = docs.map((c) => ({
+  const data = docs.map((c) => ({
     _id: c.customerId,
     routeStarCustomerId: c.customerId,
     routeStarAccountNumber: clean(c.accountNumber) || null,
@@ -59,17 +70,33 @@ async function customers(req, res) {
     routeCode: clean(c.onRoute) || routeByCust.get(c.customerId) || acctRouteByCust.get(c.customerId) || null,
     frequency: freqByCust.get(c.customerId) || acctFreqByCust.get(c.customerId) || null,
   }));
-  if (status) data = data.filter((r) => r.customerStatus === status);
+  data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
+  customersCache.set('all', data);
+  return data;
+}
+
+async function customers(req, res) {
+  const status = req.query.customerStatus && req.query.customerStatus !== 'all' ? req.query.customerStatus : null;
+  const all = await getAllCustomers();
+  let data = status ? all.filter((r) => r.customerStatus === status) : all;
   const term = clean(req.query.q);
   if (term) {
     const t = term.toLowerCase();
     data = data.filter((r) => `${r.customerName} ${r.routeCode || ''} ${r.routeStarAccountNumber || ''}`.toLowerCase().includes(t));
   }
-  data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
   const total = data.length;
   const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 200 });
   const pageRows = sliceArray(data, paging);
   res.json(buildEnvelope(pageRows, { meta: { source: 'inventory_db', total }, page: pageMeta(total, paging, pageRows.length) }));
+}
+
+async function warm() {
+  try { await getAllCustomers(); } catch (e) { /* db not ready yet */ }
+}
+
+function startWarmer() {
+  setTimeout(() => { warm(); }, 5000);
+  setInterval(() => { warm(); }, TTL_MS - 30000);
 }
 
 async function customerPricing(req, res) {
@@ -187,4 +214,4 @@ async function accountSyncStatus(req, res) {
   res.json(buildEnvelope(snapshot()));
 }
 
-module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, routes, employees, serviceCategories };
+module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, routes, employees, serviceCategories, warm, startWarmer };
