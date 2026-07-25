@@ -38,7 +38,8 @@ const env = {
 
   api: {
     port: num(process.env.PORT, 4000),
-    corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5174').split(',').map((s) => s.trim()),
+    corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:5174,http://localhost:4173')
+      .split(',').map((s) => s.trim()).filter(Boolean),
     defaultTenantCode: process.env.DEFAULT_TENANT_CODE || 'EM-NRV',
   },
 

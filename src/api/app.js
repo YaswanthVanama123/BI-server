@@ -10,7 +10,14 @@ const apiRoutes = require('./routes');
 function createApp() {
   const app = express();
   app.disable('x-powered-by');
-  app.use(cors({ origin: env.api.corsOrigins }));
+  const allowAllOrigins = env.api.corsOrigins.includes('*');
+  app.use(cors({
+    origin(origin, cb) {
+      // No Origin header = non-browser client (RN mobile app, curl, server-to-server) — always allow.
+      if (!origin || allowAllOrigins || env.api.corsOrigins.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+  }));
   app.use(express.json({ limit: '1mb' }));
   app.use(requestLogger);
 
