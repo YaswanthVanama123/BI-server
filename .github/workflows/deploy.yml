@@ -1,0 +1,91 @@
+name: Deploy to DigitalOcean
+
+# Auto-deploys the BI API to the DigitalOcean droplet on every push to main.
+# Flow: verify (npm ci + syntax check) -> SSH into the droplet -> pull main,
+# install prod deps, refresh Playwright chromium, reload under PM2, health-check.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check
+
+  deploy:
+    name: Deploy
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST || '143.198.26.239' }}
+          username: ${{ secrets.DO_USERNAME || 'root' }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          port: ${{ secrets.DO_SSH_PORT || 22 }}
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+
+            APP_DIR="${DEPLOY_APP_DIR:-/var/www/bi-backend}"
+            REPO_URL="https://github.com/ENVNVA1/BI-server.git"
+
+            # Make sure node/npm/pm2 are on PATH for non-interactive SSH shells.
+            export PATH="$PATH:/usr/local/bin:/usr/bin:$HOME/.npm-global/bin"
+            if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi
+
+            # First deploy: clone. Subsequent deploys: hard-reset to origin/main.
+            if [ ! -d "$APP_DIR/.git" ]; then
+              echo "Cloning $REPO_URL into $APP_DIR (first deploy)"
+              mkdir -p "$APP_DIR"
+              git clone "$REPO_URL" "$APP_DIR"
+            fi
+
+            cd "$APP_DIR"
+            git remote set-url origin "$REPO_URL"
+            git fetch --all --prune
+            git reset --hard origin/main
+
+            # Production install (omits nodemon; keeps express/mongoose/playwright).
+            npm ci --omit=dev
+
+            # Keep the Playwright chromium used by the daily RouteStar scheduler current.
+            # --with-deps needs root for apt; fall back gracefully if it can't run.
+            npx playwright install --with-deps chromium \
+              || npx playwright install chromium \
+              || echo "WARN: playwright chromium install skipped"
+
+            # Start (first time) or zero-downtime reload under PM2.
+            if pm2 describe bi-server >/dev/null 2>&1; then
+              pm2 reload ecosystem.config.js --update-env
+            else
+              pm2 start ecosystem.config.js
+            fi
+            pm2 save
+
+            # Health check — server exposes /health even before Mongo connects.
+            PORT="${PORT:-4000}"
+            sleep 5
+            curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null \
+              && echo "Deploy OK: /health responding on :${PORT}" \
+              || { echo "Health check FAILED"; pm2 logs bi-server --lines 40 --nostream; exit 1; }
