@@ -10,6 +10,7 @@ const round = (n, d = 2) => { const f = 10 ** d; return Math.round(n * f) / f; }
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const YEARLY = {
   weekly: 52, 'every week': 52,
@@ -23,6 +24,7 @@ const perYear = (freq) => { const f = String(freq || '').toLowerCase().replace(/
 const categoryOf = (item) => { const s = clean(item) || ''; return s.includes(':') ? s.split(':')[0].trim() : (s || 'Uncategorized'); };
 const labelOf = (item) => { const s = clean(item) || ''; const i = s.lastIndexOf(':'); return ((i >= 0 ? s.slice(i + 1) : s).trim()) || 'Uncategorized'; };
 const primaryRoute = (routes) => { for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) return String(rc).trim().toUpperCase(); } return null; };
+const allRouteCodes = (routes) => { const set = new Set(); for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) set.add(String(rc).trim().toUpperCase()); } return [...set]; };
 
 function buildAnd(from, to) {
   const and = [CLOSED];
@@ -61,13 +63,14 @@ async function computeReconciliation(from, to) {
   const cust = new Map();
   const getRec = (cid, name) => {
     let r = cust.get(cid);
-    if (!r) { r = { customerId: cid, customer: name || cid, routeCounts: new Map(), pricingRoute: null, expByItem: new Map(), actByItem: new Map(), expected: 0, actual: 0, invoices: [] }; cust.set(cid, r); }
+    if (!r) { r = { customerId: cid, customer: name || cid, routeCounts: new Map(), pricingRoute: null, routeList: [], expByItem: new Map(), actByItem: new Map(), expected: 0, actual: 0, invoices: [] }; cust.set(cid, r); }
     return r;
   };
 
   for (const a of accts) {
     const r = getRec(a.customerId, clean(a.customerName) || clean(a.company) || a.customerId);
     r.pricingRoute = primaryRoute(a.routes);
+    r.routeList = allRouteCodes(a.routes);
     for (const p of a.pricing || []) {
       const times = perYear(p.frequency); if (times <= 0) continue;
       const rev = (Number(p.salesPrice) || 0) * (Number(p.defaultQty) || 1) * times;
@@ -103,6 +106,7 @@ async function computeReconciliation(from, to) {
     if (r.routeCounts.size) route = [...r.routeCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
     else if (r.pricingRoute) route = r.pricingRoute;
     r.route = route;
+    r.routes = (r.routeList && r.routeList.length) ? r.routeList : [route];
     if (r.expected > 0 || r.actual > 0) records.push(r);
   }
   return { records, from, to };
@@ -163,7 +167,7 @@ async function byCustomer(req, res) {
   if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
   const { records } = await getReconciliation(from, to, routeCode);
   const rows = records.map((r) => ({
-    customerId: r.customerId, customer: r.customer, routeCode: r.route,
+    customerId: r.customerId, customer: r.customer, routeCode: r.route, routes: r.routes,
     expected: round(r.expected), invoiced: round(r.actual), remaining: round(r.expected - r.actual),
     pct: r.expected ? round((r.actual / r.expected) * 100, 1) : null, invoices: r.invoices.length,
   })).sort((a, b) => b.invoiced - a.invoiced);
@@ -183,7 +187,7 @@ async function customerDetail(req, res) {
   const r = records.find((x) => x.customerId === req.params.id);
   if (!r) { const e = new Error(`Customer ${req.params.id} not found in range`); e.status = 404; e.code = 'NOT_FOUND'; throw e; }
   const payload = buildEnvelope({
-    customerId: r.customerId, customer: r.customer, routeCode: r.route,
+    customerId: r.customerId, customer: r.customer, routeCode: r.route, routes: r.routes,
     expected: round(r.expected), invoiced: round(r.actual), remaining: round(r.expected - r.actual),
     pct: r.expected ? round((r.actual / r.expected) * 100, 1) : null,
     items: itemRows(r),
@@ -292,6 +296,147 @@ async function perStop(req, res) {
   res.json(payload);
 }
 
+async function drillData(from, to, { routeCode, customerId, category } = {}) {
+  const db = getSourceDb();
+  const and = buildAnd(from, to);
+  if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
+  else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
+
+  const invoices = await db.collection('routestarinvoices')
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, total: 1, lineItems: 1 } })
+    .batchSize(5000)
+    .limit(50000).toArray();
+
+  const wantKey = category ? itemKey(category) : null;
+  const custMap = new Map();
+  const itemMap = new Map();
+  const invoiceRows = [];
+  for (const inv of invoices) {
+    const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
+    if (customerId && cid !== customerId) continue;
+    const name = clean(inv.customer && inv.customer.name) || '(unknown)';
+    const lines = inv.lineItems || [];
+    let amt = 0; let matched = 0;
+    for (const li of lines) {
+      const key = itemKey(li.name);
+      if (wantKey && key !== wantKey) continue;
+      const a = Number(li.amount || 0);
+      amt += a; matched += 1;
+      const it = itemMap.get(key) || { item: labelOf(li.name), category: categoryOf(li.name), qty: 0, invoiced: 0, lines: 0 };
+      it.qty += Number(li.quantity || 0); it.invoiced += a; it.lines += 1; itemMap.set(key, it);
+    }
+    if (wantKey && matched === 0) continue;
+    const total = wantKey ? amt : Number(inv.total || 0);
+    const c = custMap.get(cid) || { customerId: cid, customer: name, invoiced: 0, stops: 0 };
+    c.invoiced += total; c.stops += 1; custMap.set(cid, c);
+    invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customerId: cid, customer: name, date: dayKey(inv.dateCompleted || inv.invoiceDate), total: round(total), lineCount: wantKey ? matched : lines.length });
+  }
+  const customers = [...custMap.values()].map((c) => ({ customerId: c.customerId, customer: c.customer, invoiced: round(c.invoiced), stops: c.stops })).sort((a, b) => b.invoiced - a.invoiced);
+  const items = [...itemMap.values()].map((i) => ({ item: i.item, category: i.category, qty: round(i.qty, 2), invoiced: round(i.invoiced), lines: i.lines })).sort((a, b) => b.invoiced - a.invoiced);
+  invoiceRows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const totalInvoiced = customers.reduce((t, c) => t + c.invoiced, 0);
+  return {
+    kpis: { invoiced: round(totalInvoiced), stops: invoiceRows.length, customers: customers.length, items: items.length },
+    customers, invoices: invoiceRows, items,
+  };
+}
+
+async function routeDetail(req, res) {
+  const { from, to, routeCode } = parseParams(req);
+  if (!routeCode) { const e = new Error('routeCode is required'); e.status = 400; e.code = 'BAD_REQUEST'; throw e; }
+  const pkey = `rtd|${routeCode}|${from || ''}|${to || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const d = await drillData(from, to, { routeCode });
+  const payload = buildEnvelope({ routeCode, ...d }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
+}
+
+async function drill(req, res) {
+  const { from, to, routeCode } = parseParams(req);
+  const rc = routeCode && routeCode !== 'ALL' ? routeCode : undefined;
+  const customerId = clean(req.query.customerId);
+  const category = clean(req.query.category);
+  const pkey = `drl|${rc || ''}|${customerId || ''}|${category || ''}|${from || ''}|${to || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+  const d = await drillData(from, to, { routeCode: rc, customerId, category });
+  const payload = buildEnvelope({ routeCode: rc || null, customerId: customerId || null, category: category || null, ...d }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
+}
+
+async function customersOverview(req, res) {
+  const { from, to, routeCode } = parseParams(req);
+  const pkey = `cov|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+
+  const db = getSourceDb();
+  const and = buildAnd(from, to);
+  if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
+  else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
+
+  const invoices = await db.collection('routestarinvoices')
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1 } })
+    .batchSize(5000)
+    .limit(50000).toArray();
+
+  const custMap = new Map();
+  const monthMap = new Map();
+  for (const inv of invoices) {
+    const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
+    const name = clean(inv.customer && inv.customer.name) || '(unknown)';
+    const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
+    const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
+    const total = Number(inv.total || 0);
+    const c = custMap.get(cid) || { customerId: cid, customer: name, invoices: 0, invoiced: 0, firstDate: null, lastDate: null, routeCounts: new Map() };
+    c.invoices += 1; c.invoiced += total;
+    if (dk) { if (!c.firstDate || dk < c.firstDate) c.firstDate = dk; if (!c.lastDate || dk > c.lastDate) c.lastDate = dk; }
+    c.routeCounts.set(rc, (c.routeCounts.get(rc) || 0) + 1);
+    custMap.set(cid, c);
+    if (dk) { const mk = dk.slice(0, 7); const m = monthMap.get(mk) || { month: mk, invoices: 0, invoiced: 0 }; m.invoices += 1; m.invoiced += total; monthMap.set(mk, m); }
+  }
+
+  const rows = [...custMap.values()].map((c) => {
+    let route = '(unassigned)';
+    if (c.routeCounts.size) route = [...c.routeCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    return { customerId: c.customerId, customer: c.customer, routeCode: route, invoices: c.invoices, invoiced: round(c.invoiced), avgInvoice: c.invoices ? round(c.invoiced / c.invoices) : 0, firstDate: c.firstDate, lastDate: c.lastDate };
+  }).sort((a, b) => b.invoices - a.invoices);
+
+  const routeMap = new Map();
+  for (const r of rows) {
+    const rm = routeMap.get(r.routeCode) || { routeCode: r.routeCode, customers: 0, invoices: 0, invoiced: 0 };
+    rm.customers += 1; rm.invoices += r.invoices; rm.invoiced += r.invoiced; routeMap.set(r.routeCode, rm);
+  }
+  const byRoute = [...routeMap.values()].map((r) => ({ routeCode: r.routeCode, customers: r.customers, invoices: r.invoices, invoiced: round(r.invoiced) })).sort((a, b) => b.customers - a.customers);
+  const months = [...monthMap.values()].map((m) => ({ month: m.month, invoices: m.invoices, invoiced: round(m.invoiced) })).sort((a, b) => a.month.localeCompare(b.month));
+
+  const totalInvoices = rows.reduce((t, r) => t + r.invoices, 0);
+  const totalInvoiced = rows.reduce((t, r) => t + r.invoiced, 0);
+  const customers = rows.length;
+  const payload = buildEnvelope({
+    kpis: {
+      customers,
+      invoices: totalInvoices,
+      invoiced: round(totalInvoiced),
+      avgInvoicesPerCustomer: customers ? round(totalInvoices / customers, 1) : 0,
+      avgRevenuePerCustomer: customers ? round(totalInvoiced / customers) : 0,
+    },
+    topByInvoices: rows.slice(0, 15).map((r) => ({ customer: r.customer, invoices: r.invoices })),
+    topByRevenue: rows.slice().sort((a, b) => b.invoiced - a.invoiced).slice(0, 15).map((r) => ({ customer: r.customer, invoiced: r.invoiced })),
+    byRoute,
+    months,
+    rows,
+  }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null, routeCode: routeCode || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
+}
+
 function commonRanges() {
   const d = new Date();
   const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
@@ -332,4 +477,4 @@ function startWarmer() {
   setInterval(() => { warm(); }, TTL_MS - 30000);
 }
 
-module.exports = { byCategory, categoryDetail, byRoute, byCustomer, customerDetail, perStop, warm, startWarmer };
+module.exports = { byCategory, categoryDetail, byRoute, routeDetail, drill, customersOverview, byCustomer, customerDetail, perStop, warm, startWarmer };
