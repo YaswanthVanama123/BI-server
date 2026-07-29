@@ -49,7 +49,7 @@ async function getAllStops(from, to) {
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
+    and.push({ dateCompleted: { $gte: start, $lte: end } });
   }
   const docs = await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
@@ -114,8 +114,8 @@ async function options(req, res) {
   ]);
   const routeCodes = [...new Set((routesRaw || []).map((r) => (clean(r) ? String(r).trim().toUpperCase() : null)).filter(Boolean))].sort();
   const md = agg[0] || {};
-  const maxDate = [md.maxC, md.maxI].filter(Boolean).sort().pop();
-  const minDate = [md.minC, md.minI].filter(Boolean).sort()[0];
+  const maxDate = md.maxC || md.maxI;
+  const minDate = md.minC || md.minI;
   const payload = buildEnvelope({ routeCodes, earliestDate: dayKey(minDate), latestDate: dayKey(maxDate), pendingPairs: pending });
   payloadCache.set('options', payload);
   res.set('X-Cache', 'MISS');

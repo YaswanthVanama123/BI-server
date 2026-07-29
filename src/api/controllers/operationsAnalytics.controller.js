@@ -52,7 +52,7 @@ async function getAllStops(from, to) {
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
+    and.push({ dateCompleted: { $gte: start, $lte: end } });
   }
   const invoices = await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })

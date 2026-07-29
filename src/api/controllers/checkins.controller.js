@@ -76,8 +76,8 @@ async function options(req, res) {
   ]);
   const routes = [...new Set((routesRaw || []).map((r) => (clean(r) ? String(r).trim().toUpperCase() : null)).filter(Boolean))].sort();
   const md = agg[0] || {};
-  const maxDate = [md.maxC, md.maxI].filter(Boolean).sort().pop();
-  const minDate = [md.minC, md.minI].filter(Boolean).sort()[0];
+  const maxDate = md.maxC || md.maxI;
+  const minDate = md.minC || md.minI;
   const payload = buildEnvelope({ routes, latestDate: dayKey(maxDate), earliestDate: dayKey(minDate) });
   cacheSet('options', payload);
   res.json(payload);
@@ -89,7 +89,7 @@ async function loadCheckins(from, to, route) {
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ $or: [{ dateCompleted: { $gte: start, $lte: end } }, { invoiceDate: { $gte: start, $lte: end } }] });
+    and.push({ dateCompleted: { $gte: start, $lte: end } });
   }
   const docs = await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: CHECKIN_PROJECTION })
