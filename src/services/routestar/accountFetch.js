@@ -7,22 +7,30 @@ const logger = require('../../utils/logger');
 
 const log = logger.child('account-fetch');
 const { CustomerAccount } = models;
+const clean = (v) => (v == null ? '' : String(v).trim());
 
 async function selectMissing({ all = false, limit } = {}) {
   const src = getSourceDb();
   const customers = await src.collection('routestarcustomers')
-    .find({}, { projection: { customerId: 1, name: 1 } }).toArray();
+    .find({}, { projection: { customerId: 1, name: 1, customerName: 1, accountNumber: 1 } }).toArray();
 
-  const already = new Set();
+  // "Done" = already captured in bi_customeraccounts AND we already have an account #
+  // (from the source record or the captured one). Captured-but-account-less customers are
+  // re-fetched so a re-sync actually tries to fill the missing account numbers.
+  const done = new Set();
   if (!all) {
-    const done = await CustomerAccount.find({ status: { $ne: 'error' } }, { customerId: 1 }).lean();
-    for (const d of done) already.add(d.customerId);
+    const captured = await CustomerAccount.find({ status: { $ne: 'error' } }, { customerId: 1, accountNumber: 1 }).lean();
+    const biAcct = new Map(captured.map((d) => [d.customerId, clean(d.accountNumber)]));
+    for (const c of customers) {
+      const hasAccount = clean(c.accountNumber) || biAcct.get(c.customerId);
+      if (biAcct.has(c.customerId) && hasAccount) done.add(c.customerId);
+    }
   }
 
   let list = customers
     .filter((c) => c.customerId)
-    .filter((c) => all || !already.has(c.customerId))
-    .map((c) => ({ customerId: c.customerId, customerName: c.name }));
+    .filter((c) => all || !done.has(c.customerId))
+    .map((c) => ({ customerId: c.customerId, customerName: c.customerName || c.name }));
   if (limit) list = list.slice(0, Number(limit));
   return list;
 }

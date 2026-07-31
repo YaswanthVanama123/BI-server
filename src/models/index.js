@@ -14,6 +14,7 @@ const analytics = require('./analytics.models');
 const customerAccount = require('./customerAccount.models');
 const sync = require('./sync.models');
 const invoiceFrequency = require('./invoiceFrequency.models');
+const user = require('./user.models');
 
 const models = {
   Tenant,
@@ -29,6 +30,7 @@ const models = {
   ...customerAccount,
   ...sync,
   ...invoiceFrequency,
+  ...user,
 };
 
 async function syncIndexes() {

@@ -9,6 +9,7 @@ const { dec } = require('./_dims');
 const { CustomerPricingItem, Employee, ServiceCategory, CustomerAccount } = models;
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
+const toDayKey = (d) => { if (!d) return null; const dt = new Date(d); return Number.isNaN(dt.getTime()) ? null : dt.toISOString().slice(0, 10); };
 
 function mapStatus(c) {
   const name = `${c.customerName || ''} ${c.company || ''}`.trim();
@@ -29,18 +30,20 @@ function makeCache(ttl) {
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < ttl) return e.v; if (e) m.delete(k); return null; },
     set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 20) m.delete(m.keys().next().value); },
+    del(k) { m.delete(k); },
   };
 }
 const customersCache = makeCache(TTL_MS);
+function invalidateCustomers() { customersCache.del('all'); }
 
 async function getAllCustomers() {
   const cached = customersCache.get('all');
   if (cached) return cached;
   const db = getSourceDb();
   const [docs, routeDocs, accts] = await Promise.all([
-    db.collection('routestarcustomers').find({}, { projection: { customerId: 1, accountNumber: 1, customerName: 1, company: 1, contact: 1, status: 1, active: 1, onRoute: 1 } }).batchSize(5000).limit(20000).toArray(),
+    db.collection('routestarcustomers').find({}, { projection: { customerId: 1, accountNumber: 1, customerName: 1, company: 1, contact: 1, status: 1, active: 1, onRoute: 1, createdDate: 1, createdAt: 1 } }).batchSize(5000).limit(20000).toArray(),
     db.collection('routestarcustomerroutes').find({}, { projection: { _id: 0, customerId: 1, frequency: 1, routeName: 1 } }).batchSize(5000).toArray(),
-    CustomerAccount.find({}, { customerId: 1, routes: 1 }).lean(),
+    CustomerAccount.find({}, { customerId: 1, routes: 1, accountNumber: 1 }).lean(),
   ]);
   const freqByCust = new Map();
   const routeByCust = new Map();
@@ -50,6 +53,7 @@ async function getAllCustomers() {
   }
   const acctRouteByCust = new Map();
   const acctFreqByCust = new Map();
+  const acctAccountByCust = new Map();
   for (const a of accts) {
     const codes = new Set();
     let freq;
@@ -60,15 +64,17 @@ async function getAllCustomers() {
     }
     if (codes.size) acctRouteByCust.set(a.customerId, [...codes].join(', '));
     if (freq) acctFreqByCust.set(a.customerId, freq);
+    if (clean(a.accountNumber)) acctAccountByCust.set(a.customerId, clean(a.accountNumber));
   }
   const data = docs.map((c) => ({
     _id: c.customerId,
     routeStarCustomerId: c.customerId,
-    routeStarAccountNumber: clean(c.accountNumber) || null,
+    routeStarAccountNumber: clean(c.accountNumber) || acctAccountByCust.get(c.customerId) || null,
     customerName: c.customerName || c.company || c.contact || '(unknown)',
     customerStatus: mapStatus(c),
     routeCode: clean(c.onRoute) || routeByCust.get(c.customerId) || acctRouteByCust.get(c.customerId) || null,
     frequency: freqByCust.get(c.customerId) || acctFreqByCust.get(c.customerId) || null,
+    createdDate: toDayKey(c.createdDate),
   }));
   data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
   customersCache.set('all', data);
@@ -83,6 +89,13 @@ async function customers(req, res) {
   if (term) {
     const t = term.toLowerCase();
     data = data.filter((r) => `${r.customerName} ${r.routeCode || ''} ${r.routeStarAccountNumber || ''}`.toLowerCase().includes(t));
+  }
+  const from = clean(req.query.from);
+  const to = clean(req.query.to);
+  if (from || to) {
+    const lo = from || to;
+    const hi = to || from;
+    data = data.filter((r) => r.createdDate && r.createdDate >= lo && r.createdDate <= hi);
   }
   const total = data.length;
   const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 200 });
@@ -214,4 +227,4 @@ async function accountSyncStatus(req, res) {
   res.json(buildEnvelope(snapshot()));
 }
 
-module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, routes, employees, serviceCategories, warm, startWarmer };
+module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };

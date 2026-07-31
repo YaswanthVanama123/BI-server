@@ -45,6 +45,11 @@ const env = {
 
   logLevel: process.env.LOG_LEVEL || 'info',
   debug: bool(process.env.DEBUG, false),
+
+  auth: {
+    secret: process.env.AUTH_SECRET || 'enviromaster-bi-dev-secret-change-me',
+    tokenTtlSec: num(process.env.AUTH_TOKEN_TTL_SEC, 7 * 24 * 3600),
+  },
 };
 
 module.exports = env;

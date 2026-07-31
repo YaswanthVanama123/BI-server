@@ -39,7 +39,7 @@ async function loadClosedInvoices(query) {
   if (from || to) {
     const start = new Date(`${from || to}T00:00:00.000Z`);
     const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
+    and.push({ invoiceDate: { $gte: start, $lte: end } });
   }
   const rc = clean(query.routeCode);
   if (rc && rc.toLowerCase() !== 'all') and.push({ assignedTo: new RegExp(`^${escapeRegex(rc)}$`, 'i') });

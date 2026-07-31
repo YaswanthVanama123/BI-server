@@ -2,6 +2,7 @@
 const router = require('express').Router();
 const requireDb = require('../middleware/requireDb');
 const tenant = require('../middleware/tenant');
+const { requireAuth } = require('../middleware/auth');
 
 router.get('/', (req, res) => {
   res.json({
@@ -22,8 +23,9 @@ router.get('/', (req, res) => {
 });
 
 router.use(require('./system.routes'));
+router.use(require('./auth.routes'));
 
-router.use(requireDb, tenant);
+router.use(requireDb, requireAuth, tenant);
 router.use(require('./operations.routes'));
 router.use(require('./revenue.routes'));
 router.use(require('./cost.routes'));

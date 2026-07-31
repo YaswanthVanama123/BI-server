@@ -371,14 +371,17 @@ async function drill(req, res) {
 
 async function customersOverview(req, res) {
   const { from, to, routeCode } = parseParams(req);
-  const pkey = `cov|${from || ''}|${to || ''}|${routeCode || ''}`;
+  const term = clean(req.query.q);
+  const pkey = `cov|${from || ''}|${to || ''}|${routeCode || ''}|${term || ''}`;
   const cached = payloadCache.get(pkey);
   if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
 
   const db = getSourceDb();
+  const rx = term ? new RegExp(escapeRegex(term), 'i') : null;
   const and = buildAnd(from, to);
   if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
   else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
+  if (rx) and.push({ 'customer.name': rx });
 
   const invoices = await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1 } })
@@ -415,12 +418,44 @@ async function customersOverview(req, res) {
   const byRoute = [...routeMap.values()].map((r) => ({ routeCode: r.routeCode, customers: r.customers, invoices: r.invoices, invoiced: round(r.invoiced) })).sort((a, b) => b.customers - a.customers);
   const months = [...monthMap.values()].map((m) => ({ month: m.month, invoices: m.invoices, invoiced: round(m.invoiced) })).sort((a, b) => a.month.localeCompare(b.month));
 
+  // New customers created in the period (source customer records: RouteStar createdDate, else insert timestamp)
+  const start = from ? new Date(`${from}T00:00:00.000Z`) : null;
+  const end = to ? new Date(`${to}T23:59:59.999Z`) : null;
+  const inRoute = (onRoute) => {
+    if (!routeCode) return true;
+    const v = clean(onRoute) ? String(onRoute).trim().toUpperCase() : '(UNASSIGNED)';
+    return v === routeCode;
+  };
+  const custDocs = await db.collection('routestarcustomers')
+    .find({}, { projection: { _id: 0, customerId: 1, customerName: 1, company: 1, onRoute: 1, accountNumber: 1, createdDate: 1, createdAt: 1 } })
+    .limit(20000).toArray();
+  const newMonthMap = new Map();
+  const newCustomerRows = [];
+  for (const c of custDocs) {
+    if (!inRoute(c.onRoute)) continue;
+    if (rx && !(rx.test(c.customerName || '') || rx.test(c.company || '') || rx.test(c.accountNumber || ''))) continue;
+    const created = c.createdDate;
+    if (!created) continue;
+    const cd = new Date(created);
+    if (Number.isNaN(cd.getTime())) continue;
+    if (start && cd < start) continue;
+    if (end && cd > end) continue;
+    const dk = cd.toISOString().slice(0, 10);
+    newCustomerRows.push({ customerId: c.customerId, customer: clean(c.customerName) || clean(c.company) || c.customerId, routeCode: clean(c.onRoute) ? String(c.onRoute).trim().toUpperCase() : '(unassigned)', accountNumber: clean(c.accountNumber) || null, createdDate: dk });
+    const mk = dk.slice(0, 7);
+    newMonthMap.set(mk, (newMonthMap.get(mk) || 0) + 1);
+  }
+  newCustomerRows.sort((a, b) => String(b.createdDate).localeCompare(String(a.createdDate)));
+  const newByMonth = [...newMonthMap.entries()].map(([month, count]) => ({ month, newCustomers: count })).sort((a, b) => a.month.localeCompare(b.month));
+  const newCustomers = newCustomerRows.length;
+
   const totalInvoices = rows.reduce((t, r) => t + r.invoices, 0);
   const totalInvoiced = rows.reduce((t, r) => t + r.invoiced, 0);
   const customers = rows.length;
   const payload = buildEnvelope({
     kpis: {
       customers,
+      newCustomers,
       invoices: totalInvoices,
       invoiced: round(totalInvoiced),
       avgInvoicesPerCustomer: customers ? round(totalInvoices / customers, 1) : 0,
@@ -430,6 +465,8 @@ async function customersOverview(req, res) {
     topByRevenue: rows.slice().sort((a, b) => b.invoiced - a.invoiced).slice(0, 15).map((r) => ({ customer: r.customer, invoiced: r.invoiced })),
     byRoute,
     months,
+    newByMonth,
+    newCustomerRows,
     rows,
   }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null, routeCode: routeCode || null } });
   payloadCache.set(pkey, payload);

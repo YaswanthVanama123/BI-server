@@ -15,6 +15,7 @@ const server = app.listen(env.api.port, () => {
 
 connectDatabase().then(() => {
 
+  require('./services/auth/ensureAdmin').ensureDefaultAdmin();
   require('./scheduler/dailyAccountFetch').start({ hour: 0, minute: 30 });
   require('./api/controllers/checkins.controller').startWarmer();
   require('./api/controllers/operationsAnalytics.controller').startWarmer();
