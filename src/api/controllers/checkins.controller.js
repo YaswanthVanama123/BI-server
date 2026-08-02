@@ -108,6 +108,7 @@ async function loadCheckins(from, to, route) {
     return {
       route: (clean(d.assignedTo) ? String(d.assignedTo).trim().toUpperCase() : '(unassigned)'),
       dateKey: dk,
+      dateCompleted: d.dateCompleted || null,
       invoiceNumber: d.invoiceNumber,
       customer: (d.customer && d.customer.name) || '',
       checkIn: clean(d.arrivalTime) || null,

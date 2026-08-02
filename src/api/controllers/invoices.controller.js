@@ -50,7 +50,7 @@ async function loadClosedInvoices(query) {
   const coll = db.collection('routestarinvoices');
   const projected = await coll.aggregate([
     { $match: filter },
-    { $sort: { invoiceDate: -1 } },
+    { $sort: { dateCompleted: -1, invoiceDate: -1 } },
     { $limit: 50000 },
     PROJECTION,
   ]).toArray();
