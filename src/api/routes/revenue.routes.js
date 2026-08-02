@@ -12,5 +12,6 @@ router.get('/customer-overview', wrap(c.customersOverview));
 router.get('/revenue/by-customer', wrap(c.byCustomer));
 router.get('/revenue/customer/:id', wrap(c.customerDetail));
 router.get('/revenue/per-stop', wrap(c.perStop));
+router.get('/items/frequency', wrap(c.itemFrequency));
 
 module.exports = router;

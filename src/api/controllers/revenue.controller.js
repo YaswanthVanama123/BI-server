@@ -3,9 +3,9 @@ const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
-const { itemKey } = require('../../services/pricingMatch');
+const { itemKey, frequencyFor } = require('../../services/pricingMatch');
 
-const { CustomerAccount } = models;
+const { CustomerAccount, InvoiceFrequency } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 2) => { const f = 10 ** d; return Math.round(n * f) / f; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
@@ -292,7 +292,7 @@ async function perStop(req, res) {
   res.json(payload);
 }
 
-async function drillData(from, to, { routeCode, customerId, category } = {}) {
+async function drillData(from, to, { routeCode, customerId, category, frequency } = {}) {
   const db = getSourceDb();
   const and = buildAnd(from, to);
   if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
@@ -304,6 +304,17 @@ async function drillData(from, to, { routeCode, customerId, category } = {}) {
     .limit(50000).toArray();
 
   const wantKey = category ? itemKey(category) : null;
+  const freqFilter = frequency ? String(frequency) : null;
+  const NONE = '(none)';
+  let pricingByCid = null; let storedByInvoice = null;
+  if (freqFilter) {
+    const accts = await CustomerAccount.find({}, { customerId: 1, pricing: 1 }).lean();
+    pricingByCid = new Map();
+    for (const a of accts) pricingByCid.set(a.customerId, a.pricing || []);
+    const storedDocs = await InvoiceFrequency.find({}, { invoiceNumber: 1, lines: 1 }).lean();
+    storedByInvoice = new Map();
+    for (const d of storedDocs) { const m = new Map(); for (const l of d.lines || []) m.set(`${l.item}||${l.rate}`, l.frequency || null); storedByInvoice.set(d.invoiceNumber, m); }
+  }
   const custMap = new Map();
   const itemMap = new Map();
   const invoiceRows = [];
@@ -313,20 +324,28 @@ async function drillData(from, to, { routeCode, customerId, category } = {}) {
     if (customerId && cid !== customerId) continue;
     const name = clean(inv.customer && inv.customer.name) || '(unknown)';
     const lines = inv.lineItems || [];
+    const pricing = freqFilter ? (pricingByCid.get(cid) || []) : null;
+    const sm = freqFilter ? storedByInvoice.get(inv.invoiceNumber) : null;
     let amt = 0; let matched = 0;
     for (const li of lines) {
       const key = itemKey(li.name);
       if (wantKey && key !== wantKey) continue;
+      if (freqFilter) {
+        const sk = `${clean(li.name) || ''}||${Number(li.rate || 0)}`;
+        let lf = sm && sm.has(sk) ? sm.get(sk) : frequencyFor(li, pricing);
+        lf = lf || null;
+        if (lf !== (freqFilter === NONE ? null : freqFilter)) continue;
+      }
       const a = Number(li.amount || 0);
       amt += a; matched += 1;
       const it = itemMap.get(key) || { item: labelOf(li.name), category: categoryOf(li.name), qty: 0, invoiced: 0, lines: 0 };
       it.qty += Number(li.quantity || 0); it.invoiced += a; it.lines += 1; itemMap.set(key, it);
     }
-    if (wantKey && matched === 0) continue;
-    const total = wantKey ? amt : Number(inv.total || 0);
+    if ((wantKey || freqFilter) && matched === 0) continue;
+    const total = (wantKey || freqFilter) ? amt : Number(inv.total || 0);
     const c = custMap.get(cid) || { customerId: cid, customer: name, invoiced: 0, stops: 0 };
     c.invoiced += total; c.stops += 1; custMap.set(cid, c);
-    invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customerId: cid, customer: name, date: dayKey(inv.dateCompleted || inv.invoiceDate), total: round(total), lineCount: wantKey ? matched : lines.length });
+    invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customerId: cid, customer: name, date: dayKey(inv.dateCompleted || inv.invoiceDate), checkIn: clean(inv.arrivalTime) || null, checkOut: clean(inv.departureTime) || null, total: round(total), lineCount: (wantKey || freqFilter) ? matched : lines.length });
   }
   const customers = [...custMap.values()].map((c) => ({ customerId: c.customerId, customer: c.customer, invoiced: round(c.invoiced), stops: c.stops })).sort((a, b) => b.invoiced - a.invoiced);
   const items = [...itemMap.values()].map((i) => ({ item: i.item, category: i.category, qty: round(i.qty, 2), invoiced: round(i.invoiced), lines: i.lines })).sort((a, b) => b.invoiced - a.invoiced);
@@ -356,11 +375,12 @@ async function drill(req, res) {
   const rc = routeCode && routeCode !== 'ALL' ? routeCode : undefined;
   const customerId = clean(req.query.customerId);
   const category = clean(req.query.category);
-  const pkey = `drl|${rc || ''}|${customerId || ''}|${category || ''}|${from || ''}|${to || ''}`;
+  const frequency = clean(req.query.frequency);
+  const pkey = `drl|${rc || ''}|${customerId || ''}|${category || ''}|${frequency || ''}|${from || ''}|${to || ''}`;
   const cached = payloadCache.get(pkey);
   if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
-  const d = await drillData(from, to, { routeCode: rc, customerId, category });
-  const payload = buildEnvelope({ routeCode: rc || null, customerId: customerId || null, category: category || null, ...d }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null } });
+  const d = await drillData(from, to, { routeCode: rc, customerId, category, frequency });
+  const payload = buildEnvelope({ routeCode: rc || null, customerId: customerId || null, category: category || null, frequency: frequency || null, ...d }, { meta: { source: 'invoices (actual)', from: from || null, to: to || null } });
   payloadCache.set(pkey, payload);
   res.set('X-Cache', 'MISS');
   res.json(payload);
@@ -515,4 +535,72 @@ function startWarmer() {
   setInterval(() => { warm(); }, TTL_MS - 30000);
 }
 
-module.exports = { byCategory, categoryDetail, byRoute, routeDetail, drill, customersOverview, byCustomer, customerDetail, perStop, warm, startWarmer };
+async function itemFrequency(req, res) {
+  const { from, to } = parseParams(req);
+  const pkey = `itemfreq|${from || ''}|${to || ''}`;
+  const cached = payloadCache.get(pkey);
+  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
+
+  const accts = await CustomerAccount.find({}, { customerId: 1, pricing: 1 }).lean();
+  const pricingByCid = new Map();
+  for (const a of accts) pricingByCid.set(a.customerId, a.pricing || []);
+
+  const storedDocs = await InvoiceFrequency.find({}, { invoiceNumber: 1, lines: 1 }).lean();
+  const storedByInvoice = new Map();
+  for (const d of storedDocs) {
+    const m = new Map();
+    for (const l of d.lines || []) m.set(`${l.item}||${l.rate}`, l.frequency || null);
+    storedByInvoice.set(d.invoiceNumber, m);
+  }
+
+  const invoices = await getClosedInvoiceLines(from, to);
+  const map = new Map();
+  const itemKeys = new Set();
+  for (const inv of invoices) {
+    const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
+    const pricing = pricingByCid.get(cid) || [];
+    const sm = storedByInvoice.get(inv.invoiceNumber);
+    for (const li of inv.lineItems || []) {
+      const key = itemKey(li.name);
+      if (!key) continue;
+      itemKeys.add(key);
+      const sk = `${clean(li.name) || ''}||${Number(li.rate || 0)}`;
+      let freq = sm && sm.has(sk) ? sm.get(sk) : frequencyFor(li, pricing);
+      freq = freq || null;
+      const gkey = `${key}||${freq || ''}`;
+      let r = map.get(gkey);
+      if (!r) { r = { item: labelOf(li.name), category: categoryOf(li.name), frequency: freq, occurrences: 0, qty: 0, invoiced: 0, invoices: new Set(), customers: new Set() }; map.set(gkey, r); }
+      r.occurrences += 1;
+      r.qty += Number(li.quantity || 0);
+      r.invoiced += Number(li.amount || 0);
+      if (inv.invoiceNumber) r.invoices.add(inv.invoiceNumber);
+      r.customers.add(cid);
+    }
+  }
+
+  const rows = [...map.values()].map((r) => ({
+    item: r.item,
+    category: r.category,
+    frequency: r.frequency,
+    perYear: round(perYear(r.frequency), 1) || null,
+    occurrences: r.occurrences,
+    invoices: r.invoices.size,
+    customers: r.customers.size,
+    qty: round(r.qty, 2),
+    invoiced: round(r.invoiced),
+  })).sort((a, b) => b.invoiced - a.invoiced);
+
+  const kpis = {
+    items: itemKeys.size,
+    occurrences: rows.reduce((t, r) => t + r.occurrences, 0),
+    invoiced: round(rows.reduce((t, r) => t + r.invoiced, 0)),
+    invoices: new Set(invoices.map((i) => i.invoiceNumber)).size,
+  };
+
+  const payload = buildEnvelope({ kpis, rows }, { meta: { source: 'invoices + pricing', from: from || null, to: to || null } });
+  payloadCache.set(pkey, payload);
+  res.set('X-Cache', 'MISS');
+  res.json(payload);
+}
+
+module.exports = { byCategory, categoryDetail, byRoute, routeDetail, drill, customersOverview, byCustomer, customerDetail, perStop, itemFrequency, warm, startWarmer };
