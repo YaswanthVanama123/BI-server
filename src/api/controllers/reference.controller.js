@@ -4,6 +4,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { startSync, snapshot } = require('../../services/routestar/accountSyncJob');
+const createdDateJob = require('../../services/routestar/createdDateSyncJob');
 const { dec } = require('./_dims');
 
 const { CustomerPricingItem, Employee, ServiceCategory, CustomerAccount } = models;
@@ -43,7 +44,7 @@ async function getAllCustomers() {
   const [docs, routeDocs, accts] = await Promise.all([
     db.collection('routestarcustomers').find({}, { projection: { customerId: 1, accountNumber: 1, customerName: 1, company: 1, contact: 1, status: 1, active: 1, onRoute: 1, createdDate: 1, createdAt: 1 } }).batchSize(5000).limit(20000).toArray(),
     db.collection('routestarcustomerroutes').find({}, { projection: { _id: 0, customerId: 1, frequency: 1, routeName: 1 } }).batchSize(5000).toArray(),
-    CustomerAccount.find({}, { customerId: 1, routes: 1, accountNumber: 1 }).lean(),
+    CustomerAccount.find({}, { customerId: 1, routes: 1, accountNumber: 1, createdDate: 1 }).lean(),
   ]);
   const freqByCust = new Map();
   const routeByCust = new Map();
@@ -54,6 +55,7 @@ async function getAllCustomers() {
   const acctRouteByCust = new Map();
   const acctFreqByCust = new Map();
   const acctAccountByCust = new Map();
+  const acctCreatedByCust = new Map();
   for (const a of accts) {
     const codes = new Set();
     let freq;
@@ -65,6 +67,7 @@ async function getAllCustomers() {
     if (codes.size) acctRouteByCust.set(a.customerId, [...codes].join(', '));
     if (freq) acctFreqByCust.set(a.customerId, freq);
     if (clean(a.accountNumber)) acctAccountByCust.set(a.customerId, clean(a.accountNumber));
+    if (a.createdDate) acctCreatedByCust.set(a.customerId, a.createdDate);
   }
   const data = docs.map((c) => ({
     _id: c.customerId,
@@ -74,7 +77,7 @@ async function getAllCustomers() {
     customerStatus: mapStatus(c),
     routeCode: clean(c.onRoute) || routeByCust.get(c.customerId) || acctRouteByCust.get(c.customerId) || null,
     frequency: freqByCust.get(c.customerId) || acctFreqByCust.get(c.customerId) || null,
-    createdDate: toDayKey(c.createdDate),
+    createdDate: toDayKey(c.createdDate) || toDayKey(acctCreatedByCust.get(c.customerId)),
   }));
   data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
   customersCache.set('all', data);
@@ -227,4 +230,14 @@ async function accountSyncStatus(req, res) {
   res.json(buildEnvelope(snapshot()));
 }
 
-module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };
+async function createdDateSync(req, res) {
+  const all = req.body && (req.body.all === true || req.body.all === '1' || req.body.all === 'true');
+  const result = createdDateJob.startSync({ all });
+  res.json(buildEnvelope(result, { meta: { source: 'routestar' } }));
+}
+
+async function createdDateSyncStatus(req, res) {
+  res.json(buildEnvelope(createdDateJob.snapshot()));
+}
+
+module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, createdDateSync, createdDateSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };

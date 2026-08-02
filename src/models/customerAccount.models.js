@@ -28,6 +28,7 @@ const customerAccountSchema = new Schema({
   pricing: { type: [pricingLineSchema], default: [] },
   routes: { type: [Schema.Types.Mixed], default: [] },
   detailUrl: { type: String },
+  createdDate: { type: Date, default: null },
   status: { type: String, enum: ['ok', 'no_account', 'error'], default: 'ok' },
   error: { type: String },
   fetchedAt: { type: Date },

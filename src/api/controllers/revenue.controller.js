@@ -429,12 +429,18 @@ async function customersOverview(req, res) {
   const custDocs = await db.collection('routestarcustomers')
     .find({}, { projection: { _id: 0, customerId: 1, customerName: 1, company: 1, onRoute: 1, accountNumber: 1, createdDate: 1, createdAt: 1 } })
     .limit(20000).toArray();
+  // Created date is scraped into bi_customeraccounts (RouteStar list "Created" column) — use it as the source of truth.
+  const acctCreated = new Map();
+  try {
+    const accts = await CustomerAccount.find({ createdDate: { $ne: null } }, { customerId: 1, createdDate: 1 }).lean();
+    for (const a of accts) { if (a.createdDate) acctCreated.set(a.customerId, a.createdDate); }
+  } catch (e) { /* ignore */ }
   const newMonthMap = new Map();
   const newCustomerRows = [];
   for (const c of custDocs) {
     if (!inRoute(c.onRoute)) continue;
     if (rx && !(rx.test(c.customerName || '') || rx.test(c.company || '') || rx.test(c.accountNumber || ''))) continue;
-    const created = c.createdDate;
+    const created = c.createdDate || acctCreated.get(c.customerId);
     if (!created) continue;
     const cd = new Date(created);
     if (Number.isNaN(cd.getTime())) continue;
