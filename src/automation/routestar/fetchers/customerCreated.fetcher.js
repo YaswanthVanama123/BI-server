@@ -1,15 +1,10 @@
 'use strict';
 
-// Scrapes the RouteStar customer LIST grid to capture each customer's "Created" date.
-// The grid columns are toggleable, so we (a) reveal hidden columns via RouteStar's own
-// showAllHidden() and (b) map columns by their header text instead of a fixed position.
-// customerId comes from the customerdetail/<id> link in the row (Customer column).
-
 async function revealAllColumns(page) {
   try {
     await page.evaluate(() => { if (typeof window.showAllHidden === 'function') window.showAllHidden(); });
     await page.waitForTimeout(1500);
-  } catch (e) { /* ignore — fall back to whatever columns are visible */ }
+  } catch (e) {}
 }
 
 async function extractPage(page) {
@@ -20,7 +15,7 @@ async function extractPage(page) {
     const colIndex = {};
     headerThs.forEach((th, i) => {
       const label = (th.textContent || '').trim().toLowerCase();
-      if (label) colIndex[label] = i - 1; // minus the leading corner th
+      if (label) colIndex[label] = i - 1;
     });
     const createdIdx = colIndex.created;
     const rows = Array.from(master.querySelectorAll('table.htCore tbody tr'));
@@ -52,7 +47,6 @@ async function currentPageNo(page) {
   });
 }
 
-// Highest numbered page link currently rendered (bootpag shows a 10-wide window).
 async function maxVisiblePage(page) {
   return page.evaluate(() => {
     let max = 0;
@@ -75,27 +69,24 @@ async function clickPageLink(page, target, dataSettleMs) {
   return false;
 }
 
-// Navigate to an explicit page number. If it isn't in the current 10-wide window, click the
-// » (li.next / next-set) until the window contains it, then click the numbered link.
 async function gotoPage(page, target, dataSettleMs) {
   if ((await currentPageNo(page)) === target) return true;
   for (let guard = 0; guard < 80; guard++) {
     if (await clickPageLink(page, target, dataSettleMs)) return true;
-    // target not visible in this window — advance the window via »
     const nextSet = await page.$('.pagination li.next');
     if (!nextSet) return false;
     const disabled = await nextSet.evaluate((el) => el.classList.contains('disabled') || el.getAttribute('aria-disabled') === 'true');
     if (disabled) return false;
     const beforeMax = await maxVisiblePage(page);
     const a = (await nextSet.$('a')) || nextSet;
-    try { await a.scrollIntoViewIfNeeded(); } catch (e) { /* ignore */ }
+    try { await a.scrollIntoViewIfNeeded(); } catch (e) {}
     try { await a.click({ timeout: 5000 }); } catch (e) { await a.evaluate((el) => el.click()); }
     let advanced = false;
     for (let i = 0; i < 30; i++) {
       await page.waitForTimeout(500);
       if ((await maxVisiblePage(page)) > beforeMax) { advanced = true; break; }
     }
-    if (!advanced) return false; // window didn't grow — no more pages
+    if (!advanced) return false;
     await page.waitForTimeout(dataSettleMs);
   }
   return false;

@@ -1,6 +1,7 @@
 'use strict';
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
+const { inFilterRange } = require('../lib/checkoutDate');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
@@ -49,15 +50,10 @@ async function getAllStops(from, to) {
 
   const db = getSourceDb();
   const and = [CLOSED];
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
-  const invoices = await db.collection('routestarinvoices')
+  const invoices = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .batchSize(5000)
-    .limit(50000).toArray();
+    .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
   const stops = [];
   for (const inv of invoices) {
@@ -246,7 +242,7 @@ async function warm() {
         payloadCache.set(`util|${r.from}|${r.to}|`, buildUtilization(stops, r.from, r.to, undefined));
         payloadCache.set(`stops|${r.from}|${r.to}|`, buildStopsPerTech(stops, r.from, r.to, undefined));
         payloadCache.set(`vol|${r.from}|${r.to}||month`, buildStopVolume(stops, r.from, r.to, undefined, 'month'));
-      } catch (e) { /* db not ready yet */ }
+      } catch (e) {}
     }
   } finally { warming = false; }
 }

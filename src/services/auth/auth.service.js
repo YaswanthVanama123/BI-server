@@ -1,5 +1,4 @@
 'use strict';
-// Self-contained auth (no external deps): scrypt password hashing + HMAC-signed JWT-style tokens.
 const crypto = require('crypto');
 const env = require('../../config/env');
 

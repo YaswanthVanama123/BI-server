@@ -2,6 +2,7 @@
 const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
+const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
 const { itemKey } = require('../../services/pricingMatch');
 
 const { CustomerAccount } = models;
@@ -26,14 +27,8 @@ const labelOf = (item) => { const s = clean(item) || ''; const i = s.lastIndexOf
 const primaryRoute = (routes) => { for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) return String(rc).trim().toUpperCase(); } return null; };
 const allRouteCodes = (routes) => { const set = new Set(); for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) set.add(String(rc).trim().toUpperCase()); } return [...set]; };
 
-function buildAnd(from, to) {
-  const and = [CLOSED];
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
-  return and;
+function buildAnd() {
+  return [CLOSED];
 }
 function parseParams(req) {
   return {
@@ -81,10 +76,11 @@ async function computeReconciliation(from, to) {
   }
 
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1, lineItems: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, lineItems: 1 } })
     .batchSize(5000)
     .limit(50000).toArray();
   for (const inv of invoices) {
+    if (!inFilterRange(inv, from, to)) continue;
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
     const r = getRec(cid, (inv.customer && inv.customer.name) || '(unknown)');
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
@@ -128,10 +124,10 @@ async function getClosedInvoiceLines(from, to) {
   const cached = rawInvCache.get(key);
   if (cached) return cached;
   const db = getSourceDb();
-  const invoices = await db.collection('routestarinvoices')
-    .find({ $and: buildAnd(from, to) }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, lineItems: 1 } })
+  const invoices = (await db.collection('routestarinvoices')
+    .find({ $and: buildAnd(from, to) }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, lineItems: 1 } })
     .batchSize(5000)
-    .limit(50000).toArray();
+    .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
   rawInvCache.set(key, invoices);
   return invoices;
 }
@@ -303,7 +299,7 @@ async function drillData(from, to, { routeCode, customerId, category } = {}) {
   else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
 
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, total: 1, lineItems: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, lineItems: 1 } })
     .batchSize(5000)
     .limit(50000).toArray();
 
@@ -312,6 +308,7 @@ async function drillData(from, to, { routeCode, customerId, category } = {}) {
   const itemMap = new Map();
   const invoiceRows = [];
   for (const inv of invoices) {
+    if (!inFilterRange(inv, from, to)) continue;
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
     if (customerId && cid !== customerId) continue;
     const name = clean(inv.customer && inv.customer.name) || '(unknown)';
@@ -383,10 +380,10 @@ async function customersOverview(req, res) {
   else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
   if (rx) and.push({ 'customer.name': rx });
 
-  const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1 } })
+  const invoices = (await db.collection('routestarinvoices')
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1 } })
     .batchSize(5000)
-    .limit(50000).toArray();
+    .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
   const custMap = new Map();
   const monthMap = new Map();
@@ -394,7 +391,7 @@ async function customersOverview(req, res) {
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || '(unknown)';
     const name = clean(inv.customer && inv.customer.name) || '(unknown)';
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
+    const dk = filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate);
     const total = Number(inv.total || 0);
     const c = custMap.get(cid) || { customerId: cid, customer: name, invoices: 0, invoiced: 0, firstDate: null, lastDate: null, routeCounts: new Map() };
     c.invoices += 1; c.invoiced += total;
@@ -418,7 +415,6 @@ async function customersOverview(req, res) {
   const byRoute = [...routeMap.values()].map((r) => ({ routeCode: r.routeCode, customers: r.customers, invoices: r.invoices, invoiced: round(r.invoiced) })).sort((a, b) => b.customers - a.customers);
   const months = [...monthMap.values()].map((m) => ({ month: m.month, invoices: m.invoices, invoiced: round(m.invoiced) })).sort((a, b) => a.month.localeCompare(b.month));
 
-  // New customers created in the period (source customer records: RouteStar createdDate, else insert timestamp)
   const start = from ? new Date(`${from}T00:00:00.000Z`) : null;
   const end = to ? new Date(`${to}T23:59:59.999Z`) : null;
   const inRoute = (onRoute) => {
@@ -429,12 +425,11 @@ async function customersOverview(req, res) {
   const custDocs = await db.collection('routestarcustomers')
     .find({}, { projection: { _id: 0, customerId: 1, customerName: 1, company: 1, onRoute: 1, accountNumber: 1, createdDate: 1, createdAt: 1 } })
     .limit(20000).toArray();
-  // Created date is scraped into bi_customeraccounts (RouteStar list "Created" column) — use it as the source of truth.
   const acctCreated = new Map();
   try {
     const accts = await CustomerAccount.find({ createdDate: { $ne: null } }, { customerId: 1, createdDate: 1 }).lean();
     for (const a of accts) { if (a.createdDate) acctCreated.set(a.customerId, a.createdDate); }
-  } catch (e) { /* ignore */ }
+  } catch (e) {}
   const newMonthMap = new Map();
   const newCustomerRows = [];
   for (const c of custDocs) {
@@ -510,7 +505,7 @@ async function warm() {
           byCustomer(fakeReq(r.from, r.to), fakeRes()),
           perStop(fakeReq(r.from, r.to), fakeRes()),
         ]);
-      } catch (e) { /* db not ready yet */ }
+      } catch (e) {}
     }
   } finally { warming = false; }
 }

@@ -6,7 +6,6 @@ const logger = require('../../utils/logger');
 const log = logger.child('auth');
 const { User } = models;
 
-// Ensures the default admin exists (admin / Admin@123). Idempotent — never overwrites an existing admin.
 async function ensureDefaultAdmin() {
   try {
     const existing = await User.findOne({ username: 'admin' });

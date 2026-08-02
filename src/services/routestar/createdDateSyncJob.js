@@ -28,7 +28,7 @@ function startSync({ all = false } = {}) {
       log.error(`created-date fetch failed: ${e.message}`);
     } finally {
       job.running = false; job.finishedAt = new Date().toISOString();
-      try { require('../../api/controllers/reference.controller').invalidateCustomers(); } catch (e) { /* ignore */ }
+      try { require('../../api/controllers/reference.controller').invalidateCustomers(); } catch (e) {}
       await recordFinish(runId, {
         status: job.phase === 'error' ? 'error' : 'done',
         summary: { scanned: job.scanned, stored: job.stored, all: job.all },

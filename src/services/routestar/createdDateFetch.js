@@ -9,9 +9,6 @@ const { CustomerAccount } = models;
 
 const parseDate = (s) => { if (!s) return null; const d = new Date(s); return Number.isNaN(d.getTime()) ? null : d; };
 
-// Scrapes the RouteStar customer list grid for every customer's "Created" date and stores it
-// into bi_customeraccounts.createdDate — only for customers that don't already have one
-// ({ all: true } backfills/overwrites everyone).
 async function fetchCreatedDates({ all = false, onProgress } = {}) {
   const existing = await CustomerAccount.find({}, { customerId: 1, createdDate: 1 }).lean();
   const have = new Map(existing.map((d) => [d.customerId, d.createdDate || null]));
@@ -35,7 +32,7 @@ async function fetchCreatedDates({ all = false, onProgress } = {}) {
           if (!cd) continue;
           const known = have.has(r.customerId);
           const alreadyHas = known && have.get(r.customerId);
-          if (!all && alreadyHas) continue; // only fill nulls unless all=true
+          if (!all && alreadyHas) continue;
           if (known) {
             ops.push({ updateOne: { filter: { customerId: r.customerId }, update: { $set: { createdDate: cd } } } });
           } else {

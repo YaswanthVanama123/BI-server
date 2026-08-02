@@ -107,7 +107,7 @@ async function customers(req, res) {
 }
 
 async function warm() {
-  try { await getAllCustomers(); } catch (e) { /* db not ready yet */ }
+  try { await getAllCustomers(); } catch (e) {}
 }
 
 function startWarmer() {

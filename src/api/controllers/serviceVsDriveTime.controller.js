@@ -2,6 +2,7 @@
 const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
+const { inFilterRange } = require('../lib/checkoutDate');
 
 const { CompanyDistance, Tenant } = models;
 
@@ -58,15 +59,10 @@ async function getAllStops(from, to) {
 
   const db = getSourceDb();
   const and = [CLOSED];
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
-  const invoices = await db.collection('routestarinvoices')
+  const invoices = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .batchSize(5000)
-    .limit(50000).toArray();
+    .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
   const stops = [];
   for (const inv of invoices) {
@@ -246,9 +242,9 @@ async function warm() {
       try {
         const stops = await getStops(r.from, r.to, undefined);
         payloadCache.set(`svc|${r.from}|${r.to}||month`, buildPayload(stops, pairMap, r.from, r.to, undefined, 'month'));
-      } catch (e) { /* db not ready yet */ }
+      } catch (e) {}
     }
-  } catch (e) { /* ignore */ } finally { warming = false; }
+  } catch (e) {} finally { warming = false; }
 }
 
 function startWarmer() {

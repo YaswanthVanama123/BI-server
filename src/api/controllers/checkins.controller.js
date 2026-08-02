@@ -1,6 +1,7 @@
 'use strict';
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
+const { inFilterRange } = require('../lib/checkoutDate');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
@@ -86,16 +87,11 @@ async function options(req, res) {
 async function loadCheckins(from, to, route) {
   const db = getSourceDb();
   const and = [CLOSED];
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
-  const docs = await db.collection('routestarinvoices')
+  const docs = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: CHECKIN_PROJECTION })
     .batchSize(5000)
     .limit(50000)
-    .toArray();
+    .toArray()).filter((d) => inFilterRange(d, from, to));
 
   const stops = docs.map((d) => {
     const serviceDate = d.dateCompleted || d.invoiceDate;
@@ -207,7 +203,7 @@ async function warm() {
   warming = true;
   try {
     for (const r of commonRanges()) {
-      try { await getCheckins(r.from, r.to, undefined); } catch (e) { /* db not ready yet */ }
+      try { await getCheckins(r.from, r.to, undefined); } catch (e) {}
     }
   } finally { warming = false; }
 }

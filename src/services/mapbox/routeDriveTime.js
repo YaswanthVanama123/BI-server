@@ -2,6 +2,7 @@
 const { models } = require('../../models');
 const { getSourceDb, getEnviromasterDb } = require('../../config/database');
 const { getLeg, geocode } = require('./mapboxService');
+const { inFilterRange } = require('../../api/lib/checkoutDate');
 const logger = require('../../utils/logger');
 
 const { RouteDriveLeg, CompanyDistance } = models;
@@ -38,14 +39,9 @@ function buildAddress(c) {
 async function discover(tenant, { from, to, registerPairs = true } = {}) {
   const db = getSourceDb();
   const and = [CLOSED];
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
-  const invoices = await db.collection('routestarinvoices')
+  const invoices = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { invoiceNumber: 1, customer: 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
-    .limit(50000).toArray();
+    .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
   const custIds = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
   const custs = await db.collection('routestarcustomers')

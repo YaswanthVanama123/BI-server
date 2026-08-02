@@ -2,6 +2,7 @@
 const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
+const { inFilterRange } = require('../lib/checkoutDate');
 const { models } = require('../../models');
 const { frequencyFor } = require('../../services/pricingMatch');
 
@@ -36,11 +37,6 @@ async function loadClosedInvoices(query) {
 
   const from = clean(query.from);
   const to = clean(query.to);
-  if (from || to) {
-    const start = new Date(`${from || to}T00:00:00.000Z`);
-    const end = new Date(`${to || from}T23:59:59.999Z`);
-    and.push({ dateCompleted: { $gte: start, $lte: end } });
-  }
   const rc = clean(query.routeCode);
   if (rc && rc.toLowerCase() !== 'all') and.push({ assignedTo: new RegExp(`^${escapeRegex(rc)}$`, 'i') });
   const term = clean(query.q);
@@ -52,14 +48,15 @@ async function loadClosedInvoices(query) {
 
   const paging = getPaging(query, { defaultPageSize: 50, maxPageSize: 200 });
   const coll = db.collection('routestarinvoices');
-  const total = await coll.countDocuments(filter);
-  const docs = await coll.aggregate([
+  const projected = await coll.aggregate([
     { $match: filter },
     { $sort: { invoiceDate: -1 } },
-    { $skip: paging.skip },
-    { $limit: paging.all ? Math.max(Math.min(total, paging.limit), 1) : paging.limit },
+    { $limit: 50000 },
     PROJECTION,
   ]).toArray();
+  const matched = projected.filter((d) => inFilterRange(d, from, to));
+  const total = matched.length;
+  const docs = paging.all ? matched : matched.slice(paging.skip, paging.skip + paging.limit);
 
   const data = docs.map((d) => ({
     invoiceNumber: d.invoiceNumber,
@@ -111,9 +108,9 @@ async function warm() {
       try {
         const key = `inv|${clean(q.from) || ''}|${clean(q.to) || ''}|${clean(q.routeCode) || ''}|${clean(q.q) || ''}|${q.page || ''}|${q.pageSize || ''}`;
         payloadCache.set(key, await loadClosedInvoices(q));
-      } catch (e) { /* db not ready */ }
+      } catch (e) {}
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) {}
 }
 
 function startWarmer() {

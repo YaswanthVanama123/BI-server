@@ -36,7 +36,6 @@ async function update(req, res) {
     if (String(body.password).length < 6) { const e = new Error('Password must be at least 6 characters.'); e.status = 400; e.code = 'BAD_REQUEST'; throw e; }
     user.passwordHash = hashPassword(body.password);
   }
-  // Never let an admin lock themselves out (demote/deactivate self).
   if (String(user._id) === req.user.id && (user.role !== 'admin' || user.active === false)) {
     const e = new Error('You cannot demote or deactivate your own admin account.'); e.status = 400; e.code = 'BAD_REQUEST'; throw e;
   }
