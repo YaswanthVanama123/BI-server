@@ -10,6 +10,7 @@ async function connectDatabase(uri = env.mongoUri, opts = {}) {
   await mongoose.connect(uri, {
     autoIndex: env.nodeEnv !== 'production',
     maxPoolSize: 20,
+    socketTimeoutMS: 120000,
     ...opts,
   });
   log.info(`connected: ${redact(uri)}`);

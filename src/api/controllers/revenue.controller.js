@@ -27,8 +27,23 @@ const labelOf = (item) => { const s = clean(item) || ''; const i = s.lastIndexOf
 const primaryRoute = (routes) => { for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) return String(rc).trim().toUpperCase(); } return null; };
 const allRouteCodes = (routes) => { const set = new Set(); for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) set.add(String(rc).trim().toUpperCase()); } return [...set]; };
 
-function buildAnd() {
-  return [CLOSED];
+function dateBound(dk, days) {
+  const d = new Date(`${dk}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+function datePrefilter(from, to) {
+  if (!from && !to) return null;
+  const range = {};
+  if (from) range.$gte = dateBound(from, -2);
+  if (to) range.$lte = dateBound(to, 2);
+  return { dateCompleted: range };
+}
+function buildAnd(from, to) {
+  const and = [CLOSED];
+  const pre = datePrefilter(from, to);
+  if (pre) and.push(pre);
+  return and;
 }
 function parseParams(req) {
   return {
@@ -43,7 +58,7 @@ function makeCache() {
   const m = new Map();
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
-    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 300) m.delete(m.keys().next().value); },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 40) m.delete(m.keys().next().value); },
   };
 }
 const reconCache = makeCache();
@@ -76,7 +91,7 @@ async function computeReconciliation(from, to) {
   }
 
   const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, lineItems: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, total: 1, 'lineItems.name': 1, 'lineItems.amount': 1 } })
     .batchSize(5000)
     .limit(50000).toArray();
   for (const inv of invoices) {
@@ -125,7 +140,7 @@ async function getClosedInvoiceLines(from, to) {
   if (cached) return cached;
   const db = getSourceDb();
   const invoices = (await db.collection('routestarinvoices')
-    .find({ $and: buildAnd(from, to) }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, lineItems: 1 } })
+    .find({ $and: buildAnd(from, to) }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, 'lineItems.name': 1, 'lineItems.description': 1, 'lineItems.quantity': 1, 'lineItems.amount': 1, 'lineItems.rate': 1 } })
     .batchSize(5000)
     .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
   rawInvCache.set(key, invoices);
@@ -298,20 +313,26 @@ async function drillData(from, to, { routeCode, customerId, category, frequency 
   if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
   else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
 
-  const invoices = await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, lineItems: 1 } })
-    .batchSize(5000)
-    .limit(50000).toArray();
-
   const wantKey = category ? itemKey(category) : null;
   const freqFilter = frequency ? String(frequency) : null;
   const NONE = '(none)';
+  if (category) and.push({ 'lineItems.name': new RegExp(escapeRegex(category), 'i') });
+
+  const invoices = await db.collection('routestarinvoices')
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, 'lineItems.name': 1, 'lineItems.quantity': 1, 'lineItems.amount': 1, 'lineItems.rate': 1 } })
+    .batchSize(5000)
+    .limit(50000).toArray();
+
   let pricingByCid = null; let storedByInvoice = null;
   if (freqFilter) {
-    const accts = await CustomerAccount.find({}, { customerId: 1, pricing: 1 }).lean();
+    const cids = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
+    const invNums = invoices.map((i) => i.invoiceNumber).filter(Boolean);
+    const [accts, storedDocs] = await Promise.all([
+      CustomerAccount.find({ customerId: { $in: cids } }, { customerId: 1, pricing: 1 }).lean(),
+      InvoiceFrequency.find({ invoiceNumber: { $in: invNums } }, { invoiceNumber: 1, lines: 1 }).lean(),
+    ]);
     pricingByCid = new Map();
     for (const a of accts) pricingByCid.set(a.customerId, a.pricing || []);
-    const storedDocs = await InvoiceFrequency.find({}, { invoiceNumber: 1, lines: 1 }).lean();
     storedByInvoice = new Map();
     for (const d of storedDocs) { const m = new Map(); for (const l of d.lines || []) m.set(`${l.item}||${l.rate}`, l.frequency || null); storedByInvoice.set(d.invoiceNumber, m); }
   }
@@ -541,11 +562,16 @@ async function itemFrequency(req, res) {
   const cached = payloadCache.get(pkey);
   if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
 
-  const accts = await CustomerAccount.find({}, { customerId: 1, pricing: 1 }).lean();
+  const invoices = await getClosedInvoiceLines(from, to);
+
+  const cids = [...new Set(invoices.map((i) => customerIdFromLink(i.customer && i.customer.link)).filter(Boolean))];
+  const invNums = invoices.map((i) => i.invoiceNumber).filter(Boolean);
+  const [accts, storedDocs] = await Promise.all([
+    CustomerAccount.find({ customerId: { $in: cids } }, { customerId: 1, pricing: 1 }).lean(),
+    InvoiceFrequency.find({ invoiceNumber: { $in: invNums } }, { invoiceNumber: 1, lines: 1 }).lean(),
+  ]);
   const pricingByCid = new Map();
   for (const a of accts) pricingByCid.set(a.customerId, a.pricing || []);
-
-  const storedDocs = await InvoiceFrequency.find({}, { invoiceNumber: 1, lines: 1 }).lean();
   const storedByInvoice = new Map();
   for (const d of storedDocs) {
     const m = new Map();
@@ -553,7 +579,6 @@ async function itemFrequency(req, res) {
     storedByInvoice.set(d.invoiceNumber, m);
   }
 
-  const invoices = await getClosedInvoiceLines(from, to);
   const map = new Map();
   const itemKeys = new Set();
   for (const inv of invoices) {

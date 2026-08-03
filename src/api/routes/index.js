@@ -36,5 +36,6 @@ router.use(require('./invoices.routes'));
 router.use(require('./checkins.routes'));
 router.use(require('./routeDriveTime.routes'));
 router.use(require('./companyDistance.routes'));
+router.use(require('./dataPull.routes'));
 
 module.exports = router;

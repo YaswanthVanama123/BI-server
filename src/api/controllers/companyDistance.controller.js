@@ -11,7 +11,7 @@ function makeCache(ttl) {
   const m = new Map();
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < ttl) return e.v; if (e) m.delete(k); return null; },
-    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 100) m.delete(m.keys().next().value); },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 40) m.delete(m.keys().next().value); },
     clear() { m.clear(); },
   };
 }
@@ -46,8 +46,9 @@ async function kpiCounts(tenantId) {
 
 async function list(req, res) {
   const tenant = await ensureTenant(req);
+  const all = String(req.query.pageSize) === 'all';
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+  const pageSize = all ? null : Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
 
   const q = { tenantId: tenant._id };
   const st = req.query.status;
@@ -66,17 +67,15 @@ async function list(req, res) {
     q.$or = [{ fromCompany: rx }, { toCompany: rx }];
   }
 
-  const lkey = `${tenant._id}|${st || 'all'}|${from || ''}|${to || ''}|${term || ''}|${page}|${pageSize}`;
+  const lkey = `${tenant._id}|${st || 'all'}|${from || ''}|${to || ''}|${term || ''}|${all ? 'all' : `${page}|${pageSize}`}`;
   const cachedPage = listCache.get(lkey);
   if (cachedPage) { res.set('X-Cache', 'HIT'); return res.json(cachedPage); }
 
+  const finder = CompanyDistance.find(q).sort({ fromCompany: 1, toCompany: 1 });
+  if (!all) finder.skip((page - 1) * pageSize).limit(pageSize);
   const [filtered, rows, kpi] = await Promise.all([
     CompanyDistance.countDocuments(q),
-    CompanyDistance.find(q)
-      .sort({ fromCompany: 1, toCompany: 1 })
-      .skip((page - 1) * pageSize)
-      .limit(pageSize)
-      .lean(),
+    finder.lean(),
     kpiCounts(tenant._id),
   ]);
 
@@ -91,7 +90,9 @@ async function list(req, res) {
 
   const payload = buildEnvelope(data, {
     meta: { ...kpi, filtered },
-    page: { page, pageSize, total: filtered, totalPages: Math.max(1, Math.ceil(filtered / pageSize)) },
+    page: all
+      ? { page: 1, pageSize: data.length, total: filtered, totalPages: 1 }
+      : { page, pageSize, total: filtered, totalPages: Math.max(1, Math.ceil(filtered / pageSize)) },
   });
   listCache.set(lkey, payload);
   res.set('X-Cache', 'MISS');

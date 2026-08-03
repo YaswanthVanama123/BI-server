@@ -1,5 +1,6 @@
 'use strict';
 const { buildEnvelope } = require('../lib/envelope');
+const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange } = require('../lib/checkoutDate');
 
@@ -64,6 +65,20 @@ function elapsedToMinutes(s) {
 }
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
+function dateBound(dk, days) {
+  const d = new Date(`${dk}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+function datePrefilter(from, to) {
+  if (!from && !to) return null;
+  const range = {};
+  if (from) range.$gte = dateBound(from, -2);
+  if (to) range.$lte = dateBound(to, 2);
+  return { dateCompleted: range };
+}
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 async function options(req, res) {
   const cached = cacheGet('options');
   if (cached) return res.json(cached);
@@ -87,6 +102,9 @@ async function options(req, res) {
 async function loadCheckins(from, to, route) {
   const db = getSourceDb();
   const and = [CLOSED];
+  const pre = datePrefilter(from, to);
+  if (pre) and.push(pre);
+  if (route) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(route)}\\s*$`, 'i') });
   const docs = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: CHECKIN_PROJECTION })
     .batchSize(5000)
@@ -181,8 +199,62 @@ async function checkins(req, res) {
   const to = clean(req.query.to) || clean(req.query.date) || from;
   const route = (clean(req.query.route) || clean(req.query.routeCode) || '').toUpperCase() || undefined;
   const { payload, hit } = await getCheckins(from, to, route);
+  const groups = payload.data || [];
+
+  const routesSet = new Set(); const daysSet = new Set();
+  let totalStops = 0; let totalService = 0; let totalGap = 0; let totalSpan = 0; let flagged = 0;
+  const perRouteMap = new Map();
+  const counts = {};
+  for (const g of groups) {
+    routesSet.add(g.route); daysSet.add(g.date);
+    totalStops += g.stopCount || 0; totalService += g.totalServiceMinutes || 0;
+    totalGap += g.totalGapMinutes || 0; totalSpan += g.spanMinutes || 0; flagged += g.flaggedStops || 0;
+    const a = perRouteMap.get(g.route) || { route: g.route, stops: 0, service: 0, gap: 0, span: 0 };
+    a.stops += g.stopCount || 0; a.service += g.totalServiceMinutes || 0; a.gap += g.totalGapMinutes || 0; a.span += g.spanMinutes || 0;
+    perRouteMap.set(g.route, a);
+    for (const s of g.stops || []) counts[s.elapsedStatus] = (counts[s.elapsedStatus] || 0) + 1;
+  }
+  const kpis = {
+    routes: routesSet.size,
+    days: daysSet.size,
+    totalStops,
+    totalService,
+    avgServicePerStop: totalStops ? totalService / totalStops : 0,
+    totalGap,
+    flagged,
+    servicePct: totalSpan ? (totalService / totalSpan) * 100 : 0,
+  };
+  const perRoute = [...perRouteMap.values()].sort((a, b) => b.span - a.span);
+  const statusData = Object.entries(counts).map(([name, value]) => ({ name, value }));
+
+  const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
+  const slim = groups.map(({ stops, ...rest }) => rest);
+  const total = slim.length;
+  const summary = sliceArray(slim, paging);
+
   res.set('X-Cache', hit ? 'HIT' : 'MISS');
-  res.json(payload);
+  res.json(buildEnvelope({ kpis, perRoute, statusData, summary }, { meta: payload.meta, page: pageMeta(total, paging, summary.length) }));
+}
+
+async function checkinStops(req, res) {
+  const from = clean(req.query.from) || clean(req.query.date);
+  const to = clean(req.query.to) || clean(req.query.date) || from;
+  const route = (clean(req.query.route) || clean(req.query.routeCode) || '').toUpperCase() || undefined;
+  const term = clean(req.query.q);
+  const { payload, hit } = await getCheckins(from, to, route);
+  const groups = payload.data || [];
+  let flat = [];
+  for (const g of groups) for (const s of g.stops || []) flat.push(s);
+  flat.sort((a, b) => String(a.dateKey || '').localeCompare(String(b.dateKey || '')) || String(a.checkIn || '').localeCompare(String(b.checkIn || '')));
+  if (term) {
+    const t = term.toLowerCase();
+    flat = flat.filter((s) => `${s.invoiceNumber || ''} ${s.customer || ''} ${s.route || ''} ${s.elapsedStatus || ''}`.toLowerCase().includes(t));
+  }
+  const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
+  const total = flat.length;
+  const pageRows = sliceArray(flat, paging);
+  res.set('X-Cache', hit ? 'HIT' : 'MISS');
+  res.json(buildEnvelope(pageRows, { meta: { source: 'inventory_db', from: from || null, to: to || null, route: route || null }, page: pageMeta(total, paging, pageRows.length) }));
 }
 
 function commonRanges() {
@@ -209,9 +281,20 @@ async function warm() {
   } finally { warming = false; }
 }
 
+async function ensureIndexes() {
+  try {
+    const coll = getSourceDb().collection('routestarinvoices');
+    await coll.createIndex({ dateCompleted: 1 });
+    await coll.createIndex({ invoiceDate: 1 });
+    await coll.createIndex({ invoiceType: 1 });
+    await coll.createIndex({ status: 1 });
+  } catch (e) {}
+}
+
 function startWarmer() {
+  setTimeout(() => { ensureIndexes(); }, 3000);
   setTimeout(() => { warm(); }, 5000);
   setInterval(() => { warm(); }, TTL_MS - 30000);
 }
 
-module.exports = { options, checkins, warm, startWarmer };
+module.exports = { options, checkins, checkinStops, warm, startWarmer };

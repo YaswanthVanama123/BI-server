@@ -17,6 +17,19 @@ function toMinutes(s) {
   return h * 60 + mi;
 }
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+
+function dateBound(dk, days) {
+  const d = new Date(`${dk}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+function datePrefilter(from, to) {
+  if (!from && !to) return null;
+  const range = {};
+  if (from) range.$gte = dateBound(from, -2);
+  if (to) range.$lte = dateBound(to, 2);
+  return { dateCompleted: range };
+}
 function bucketKey(dk, g) {
   if (!dk) return null;
   if (g === 'day') return dk;
@@ -29,7 +42,7 @@ function makeCache() {
   const m = new Map();
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
-    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 300) m.delete(m.keys().next().value); },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 40) m.delete(m.keys().next().value); },
   };
 }
 const stopsCache = makeCache();
@@ -50,6 +63,8 @@ async function getAllStops(from, to) {
 
   const db = getSourceDb();
   const and = [CLOSED];
+  const pre = datePrefilter(from, to);
+  if (pre) and.push(pre);
   const invoices = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .batchSize(5000)

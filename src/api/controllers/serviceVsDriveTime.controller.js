@@ -1,6 +1,7 @@
 'use strict';
 const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
+const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange } = require('../lib/checkoutDate');
 
@@ -20,6 +21,19 @@ function toMinutes(s) {
   return h * 60 + mi;
 }
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+
+function dateBound(dk, days) {
+  const d = new Date(`${dk}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+function datePrefilter(from, to) {
+  if (!from && !to) return null;
+  const range = {};
+  if (from) range.$gte = dateBound(from, -2);
+  if (to) range.$lte = dateBound(to, 2);
+  return { dateCompleted: range };
+}
 
 function bucketKey(dk, granularity) {
   if (!dk) return null;
@@ -45,7 +59,7 @@ function makeCache() {
   const m = new Map();
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
-    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 300) m.delete(m.keys().next().value); },
+    set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 40) m.delete(m.keys().next().value); },
   };
 }
 const stopsCache = makeCache();
@@ -59,6 +73,8 @@ async function getAllStops(from, to) {
 
   const db = getSourceDb();
   const and = [CLOSED];
+  const pre = datePrefilter(from, to);
+  if (pre) and.push(pre);
   const invoices = (await db.collection('routestarinvoices')
     .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .batchSize(5000)
@@ -91,22 +107,19 @@ async function getStops(from, to, routeCode) {
   return routeCode ? all.filter((s) => s.routeCode === routeCode) : all;
 }
 
-async function getPairMap(tenantId) {
-  const key = String(tenantId || 'default');
-  const cached = pairCache.get(key);
-  if (cached) return cached;
+async function getPairMap(tenantId, names) {
   const pairMap = new Map();
-  if (tenantId) {
-    const pairs = await CompanyDistance.find(
-      { tenantId, drivingMinutes: { $ne: null } },
-      { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 },
-    ).lean();
-    for (const p of pairs) {
-      const k = `${normName(p.fromCompany)}||${normName(p.toCompany)}`;
-      if (!pairMap.has(k)) pairMap.set(k, p);
-    }
+  if (!tenantId) return pairMap;
+  const q = { tenantId, drivingMinutes: { $ne: null } };
+  if (Array.isArray(names) && names.length) { q.fromCompany = { $in: names }; q.toCompany = { $in: names }; }
+  const pairs = await CompanyDistance.find(
+    q,
+    { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 },
+  ).lean();
+  for (const p of pairs) {
+    const k = `${normName(p.fromCompany)}||${normName(p.toCompany)}`;
+    if (!pairMap.has(k)) pairMap.set(k, p);
   }
-  pairCache.set(key, pairMap);
   return pairMap;
 }
 
@@ -205,15 +218,25 @@ async function serviceVsDriveTime(req, res) {
   const granularity = ['day', 'week', 'month'].includes(req.query.granularity) ? req.query.granularity : 'month';
 
   const pkey = `svc|${from || ''}|${to || ''}|${routeCode || ''}|${granularity}`;
-  const cached = payloadCache.get(pkey);
-  if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
-
-  const tenantId = await ensureTenantId(req);
-  const [stops, pairMap] = await Promise.all([getStops(from, to, routeCode), getPairMap(tenantId)]);
-  const payload = buildPayload(stops, pairMap, from, to, routeCode, granularity);
-  payloadCache.set(pkey, payload);
-  res.set('X-Cache', 'MISS');
-  res.json(payload);
+  let full = payloadCache.get(pkey);
+  if (!full) {
+    const tenantId = await ensureTenantId(req);
+    const stops = await getStops(from, to, routeCode);
+    const names = [...new Set(stops.map((s) => s.customer).filter(Boolean))];
+    const pairMap = await getPairMap(tenantId, names);
+    full = buildPayload(stops, pairMap, from, to, routeCode, granularity).data;
+    payloadCache.set(pkey, full);
+    res.set('X-Cache', 'MISS');
+  } else {
+    res.set('X-Cache', 'HIT');
+  }
+  const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
+  const total = full.byRouteDay.length;
+  const byRouteDay = sliceArray(full.byRouteDay, paging);
+  res.json(buildEnvelope(
+    { kpis: full.kpis, series: full.series, byRoute: full.byRoute, byTechnician: full.byTechnician, byRouteDay },
+    { meta: { source: 'inventory_db + bi_companydistances', from: from || null, to: to || null, routeCode: routeCode || null, granularity }, page: pageMeta(total, paging, byRouteDay.length) },
+  ));
 }
 
 function commonRanges() {
@@ -237,11 +260,12 @@ async function warm() {
     const env = require('../../config/env');
     const t = await Tenant.findOne({ tenantCode: env.api.defaultTenantCode });
     const tenantId = t ? t._id : null;
-    const pairMap = await getPairMap(tenantId);
     for (const r of commonRanges()) {
       try {
         const stops = await getStops(r.from, r.to, undefined);
-        payloadCache.set(`svc|${r.from}|${r.to}||month`, buildPayload(stops, pairMap, r.from, r.to, undefined, 'month'));
+        const names = [...new Set(stops.map((s) => s.customer).filter(Boolean))];
+        const pairMap = await getPairMap(tenantId, names);
+        payloadCache.set(`svc|${r.from}|${r.to}||month`, buildPayload(stops, pairMap, r.from, r.to, undefined, 'month').data);
       } catch (e) {}
     }
   } catch (e) {} finally { warming = false; }

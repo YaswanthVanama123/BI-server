@@ -13,7 +13,8 @@ const server = app.listen(env.api.port, () => {
   log.info(`CORS origins: ${env.api.corsOrigins.join(', ')}`);
 });
 
-connectDatabase().then(() => {
+connectDatabase().then(async () => {
+  await require('./config/ensureIndexes').ensureSourceIndexes();
 
   require('./services/auth/ensureAdmin').ensureDefaultAdmin();
   require('./scheduler/dailyAccountFetch').start({ hour: 0, minute: 30 });
