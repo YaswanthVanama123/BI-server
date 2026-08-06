@@ -11,6 +11,14 @@ const pricingLineSchema = new Schema({
   frequency: { type: String },
 }, { _id: false });
 
+const activityLineSchema = new Schema({
+  txn: { type: String, default: null },
+  type: { type: String },
+  message: { type: String },
+  timestamp: { type: String },
+  user: { type: String },
+}, { _id: false });
+
 const customerAccountSchema = new Schema({
   customerId: { type: String, required: true, unique: true },
   customerName: { type: String },
@@ -27,6 +35,7 @@ const customerAccountSchema = new Schema({
   zone: { type: String },
   pricing: { type: [pricingLineSchema], default: [] },
   routes: { type: [Schema.Types.Mixed], default: [] },
+  activity: { type: [activityLineSchema], default: [] },
   detailUrl: { type: String },
   createdDate: { type: Date, default: null },
   status: { type: String, enum: ['ok', 'no_account', 'error'], default: 'ok' },

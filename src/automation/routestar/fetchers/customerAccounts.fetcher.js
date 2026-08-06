@@ -69,6 +69,21 @@ function mapPricing(rowObjs) {
     .filter((p) => p.item);
 }
 
+function mapActivity(rowObjs) {
+  return rowObjs
+    .map((o) => {
+      const txn = clean(o['Txn #']);
+      return {
+        txn: txn && txn !== '-n/a-' ? txn : null,
+        type: clean(o.Type),
+        message: clean(o.Message),
+        timestamp: clean(o['Time Stamp']),
+        user: clean(o.User),
+      };
+    })
+    .filter((a) => a.type || a.message || a.timestamp);
+}
+
 async function fetchCustomerAccounts({ session, navigator }, { customers = [], onResult, accumulate = true } = {}) {
   const page = session.page;
   const sel = session.selectors.customerDetail;
@@ -117,6 +132,17 @@ async function fetchCustomerAccounts({ session, navigator }, { customers = [], o
       } catch (e) {
         rec.routes = [];
         log.warn(`  routes extract failed: ${e.message}`);
+      }
+
+      try {
+        await page.click(sel.activityTabLink, { timeout: 5000 });
+        await page.waitForTimeout(2500);
+        await page.waitForSelector(sel.activityRows, { timeout: 15000 }).catch(() => {});
+        rec.activity = mapActivity(await extractAllRows(page, { holderSel: sel.activityHolder, headerSel: sel.activityHeaders, rowSel: sel.activityRows }));
+        log.info(`  activity rows=${rec.activity.length}`);
+      } catch (e) {
+        rec.activity = [];
+        log.warn(`  activity extract failed: ${e.message}`);
       }
     } catch (e) {
       rec.status = 'error';

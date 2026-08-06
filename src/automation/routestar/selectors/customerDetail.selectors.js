@@ -27,4 +27,10 @@ module.exports = {
   routesHolder: '#route-list-table .ht_master .wtHolder',
   routeHeaders: '#route-list-table .ht_master table.htCore thead th',
   routeRows: '#route-list-table .ht_master table.htCore tbody tr',
+
+  activityTabLink: 'a[href="#tab1"]',
+  activityPane: '#tab1',
+  activityHolder: '#activity-list-table .ht_master .wtHolder',
+  activityHeaders: '#activity-list-table .ht_master table.htCore thead th',
+  activityRows: '#activity-list-table .ht_master table.htCore tbody tr',
 };

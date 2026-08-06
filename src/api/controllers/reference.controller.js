@@ -44,7 +44,7 @@ async function getAllCustomers() {
   const [docs, routeDocs, accts] = await Promise.all([
     db.collection('routestarcustomers').find({}, { projection: { customerId: 1, accountNumber: 1, customerName: 1, company: 1, contact: 1, status: 1, active: 1, onRoute: 1, createdDate: 1, createdAt: 1 } }).batchSize(5000).limit(20000).toArray(),
     db.collection('routestarcustomerroutes').find({}, { projection: { _id: 0, customerId: 1, frequency: 1, routeName: 1 } }).batchSize(5000).toArray(),
-    CustomerAccount.find({}, { customerId: 1, routes: 1, accountNumber: 1, createdDate: 1 }).lean(),
+    CustomerAccount.find({}, { customerId: 1, routes: 1, accountNumber: 1, createdDate: 1, customerName: 1, company: 1 }).lean(),
   ]);
   const freqByCust = new Map();
   const routeByCust = new Map();
@@ -56,6 +56,7 @@ async function getAllCustomers() {
   const acctFreqByCust = new Map();
   const acctAccountByCust = new Map();
   const acctCreatedByCust = new Map();
+  const acctNameByCust = new Map();
   for (const a of accts) {
     const codes = new Set();
     let freq;
@@ -68,17 +69,29 @@ async function getAllCustomers() {
     if (freq) acctFreqByCust.set(a.customerId, freq);
     if (clean(a.accountNumber)) acctAccountByCust.set(a.customerId, clean(a.accountNumber));
     if (a.createdDate) acctCreatedByCust.set(a.customerId, a.createdDate);
+    const an = clean(a.customerName) || clean(a.company);
+    if (an) acctNameByCust.set(a.customerId, an);
   }
-  const data = docs.map((c) => ({
-    _id: c.customerId,
-    routeStarCustomerId: c.customerId,
-    routeStarAccountNumber: clean(c.accountNumber) || acctAccountByCust.get(c.customerId) || null,
-    customerName: c.customerName || c.company || c.contact || '(unknown)',
-    customerStatus: mapStatus(c),
-    routeCode: clean(c.onRoute) || routeByCust.get(c.customerId) || acctRouteByCust.get(c.customerId) || null,
-    frequency: freqByCust.get(c.customerId) || acctFreqByCust.get(c.customerId) || null,
-    createdDate: toDayKey(c.createdDate) || toDayKey(acctCreatedByCust.get(c.customerId)),
-  }));
+  // Universe = every customer from the source import UNION everyone stored in
+  // bi_customeraccounts (which includes customers discovered from the live grid
+  // that aren't in the source import yet), so they all appear in the list.
+  const docById = new Map(docs.map((c) => [c.customerId, c]));
+  const allIds = new Set(docById.keys());
+  for (const a of accts) if (a.customerId) allIds.add(a.customerId);
+  const data = [...allIds].map((id) => {
+    const c = docById.get(id);
+    const name = (c && (c.customerName || c.company || c.contact)) || acctNameByCust.get(id) || '(unknown)';
+    return {
+      _id: id,
+      routeStarCustomerId: id,
+      routeStarAccountNumber: (c && clean(c.accountNumber)) || acctAccountByCust.get(id) || null,
+      customerName: name,
+      customerStatus: c ? mapStatus(c) : mapStatus({ customerName: name }),
+      routeCode: (c && clean(c.onRoute)) || routeByCust.get(id) || acctRouteByCust.get(id) || null,
+      frequency: freqByCust.get(id) || acctFreqByCust.get(id) || null,
+      createdDate: (c && toDayKey(c.createdDate)) || toDayKey(acctCreatedByCust.get(id)),
+    };
+  });
   data.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
   customersCache.set('all', data);
   return data;
@@ -215,6 +228,7 @@ async function customerAccount(req, res) {
     billing,
     pricing,
     routes,
+    activity: (acct && acct.activity && acct.activity.length) ? acct.activity : [],
     fetchedAt: (acct && acct.fetchedAt) || null,
     source: acct ? 'bi_customeraccounts' : 'inventory_db',
   }));
@@ -230,6 +244,18 @@ async function accountSyncStatus(req, res) {
   res.json(buildEnvelope(snapshot()));
 }
 
+async function deleteAllAccounts(req, res) {
+  const snap = snapshot();
+  if (snap && snap.running) {
+    const e = new Error('A customer fetch is currently running — wait for it to finish before deleting.');
+    e.status = 409; e.code = 'SYNC_RUNNING';
+    throw e;
+  }
+  const r = await CustomerAccount.deleteMany({});
+  invalidateCustomers();
+  res.json(buildEnvelope({ deleted: (r && r.deletedCount) || 0 }, { meta: { source: 'bi_customeraccounts' } }));
+}
+
 async function createdDateSync(req, res) {
   const all = req.body && (req.body.all === true || req.body.all === '1' || req.body.all === 'true');
   const result = createdDateJob.startSync({ all });
@@ -240,4 +266,4 @@ async function createdDateSyncStatus(req, res) {
   res.json(buildEnvelope(createdDateJob.snapshot()));
 }
 
-module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, createdDateSync, createdDateSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };
+module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, deleteAllAccounts, createdDateSync, createdDateSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };

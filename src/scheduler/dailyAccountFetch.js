@@ -1,5 +1,6 @@
 'use strict';
 
+const env = require('../config/env');
 const logger = require('../utils/logger');
 const { startSync, isRunning } = require('../services/routestar/accountSyncJob');
 
@@ -13,22 +14,27 @@ function msUntilNext(hour, minute) {
   return next.getTime() - now.getTime();
 }
 
-function runOnce() {
+function runOnce(all = env.routestar.accountFetch.all) {
   if (isRunning()) { log.warn('account sync already running — skipping this tick'); return; }
-  const r = startSync({});
-  log.info(`daily customer account fetch ${r.started ? 'started in background' : 'skipped (already running)'}`);
+  const r = startSync({ all });
+  log.info(`daily customer account fetch (${all ? 'all customers' : 'missing only'}) ${r.started ? 'started in background' : 'skipped (already running)'}`);
 }
 
-function start({ hour = 0, minute = 30 } = {}) {
+function start(opts = {}) {
+  const cfg = env.routestar.accountFetch;
+  const hour = opts.hour != null ? opts.hour : cfg.hour;
+  const minute = opts.minute != null ? opts.minute : cfg.minute;
+  const all = opts.all != null ? opts.all : cfg.all;
   const hh = String(hour).padStart(2, '0');
   const mm = String(minute).padStart(2, '0');
   const schedule = () => {
     const wait = msUntilNext(hour, minute);
-    log.info(`next customer account auto-fetch at ${hh}:${mm} (in ~${Math.round(wait / 60000)} min)`);
-    timer = setTimeout(() => { runOnce(); schedule(); }, wait);
+    log.info(`next customer account auto-fetch at ${hh}:${mm} (${all ? 'all customers' : 'missing only'}, in ~${Math.round(wait / 60000)} min)`);
+    timer = setTimeout(() => { runOnce(all); schedule(); }, wait);
     if (timer.unref) timer.unref();
   };
   schedule();
+  if (cfg.onStart) { log.info('ACCOUNT_FETCH_ON_START set — running an initial full fetch now'); runOnce(all); }
   return { stop: () => { if (timer) clearTimeout(timer); } };
 }
 

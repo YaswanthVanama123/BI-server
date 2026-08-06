@@ -23,6 +23,12 @@ const env = {
     baseUrl: process.env.ROUTESTAR_BASE_URL || 'https://emnrv.routestar.online',
     username: process.env.ROUTESTAR_USERNAME,
     password: process.env.ROUTESTAR_PASSWORD,
+    accountFetch: {
+      all: bool(process.env.ACCOUNT_FETCH_ALL, false),
+      hour: num(process.env.ACCOUNT_FETCH_HOUR, 0),
+      minute: num(process.env.ACCOUNT_FETCH_MINUTE, 30),
+      onStart: bool(process.env.ACCOUNT_FETCH_ON_START, false),
+    },
   },
 
   browser: {
