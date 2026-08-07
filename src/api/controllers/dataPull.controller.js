@@ -12,6 +12,10 @@ const round = (n, d = 2) => { const f = 10 ** d; return Math.round(n * f) / f; }
 const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+function activityDateKey(ts) {
+  const m = String(ts || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return m ? `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}` : null;
+}
 const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
 const categoryOf = (item) => { const s = clean(item) || ''; return s.includes(':') ? s.split(':')[0].trim() : (s || null); };
 
@@ -84,7 +88,11 @@ async function pairMapFor(tid, names) {
   const q = { tenantId: tid, drivingMinutes: { $ne: null } };
   if (Array.isArray(names) && names.length) { q.fromCompany = { $in: names }; q.toCompany = { $in: names }; }
   const pairs = await CompanyDistance.find(q, { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 }).lean();
-  for (const p of pairs) { const k = `${normName(p.fromCompany)}||${normName(p.toCompany)}`; if (!map.has(k)) map.set(k, p); }
+  for (const p of pairs) {
+    const a = normName(p.fromCompany); const b = normName(p.toCompany);
+    if (!map.has(`${a}||${b}`)) map.set(`${a}||${b}`, p);
+    if (!map.has(`${b}||${a}`)) map.set(`${b}||${a}`, p);
+  }
   return map;
 }
 
@@ -94,13 +102,13 @@ async function buildRows(from, to) {
   const pre = datePrefilter(from, to);
   if (pre) and.push(pre);
   const invoices = (await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, 'lineItems.name': 1, 'lineItems.description': 1, 'lineItems.rate': 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1, serviceNotes: 1, 'invoiceDetails.serviceNotes': 1, 'lineItems.name': 1, 'lineItems.description': 1, 'lineItems.rate': 1 } })
     .batchSize(5000)
     .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
   const invNums = invoices.map((i) => i.invoiceNumber).filter(Boolean);
   const [accts, custDocs, storedDocs, tid] = await Promise.all([
-    CustomerAccount.find({}, { customerId: 1, serviceAddress1: 1, serviceAddress2: 1, serviceAddress3: 1, serviceCity: 1, serviceState: 1, serviceZip: 1, pricing: 1, routes: 1 }).lean(),
+    CustomerAccount.find({}, { customerId: 1, serviceAddress1: 1, serviceAddress2: 1, serviceAddress3: 1, serviceCity: 1, serviceState: 1, serviceZip: 1, pricing: 1, routes: 1, activity: { $slice: 1 } }).lean(),
     db.collection('routestarcustomers').find({}, { projection: { customerId: 1, customerName: 1, company: 1, status: 1, active: 1 } }).batchSize(5000).limit(20000).toArray(),
     InvoiceFrequency.find({ invoiceNumber: { $in: invNums } }, { invoiceNumber: 1, lines: 1 }).lean(),
     tenantId(),
@@ -125,6 +133,7 @@ async function buildRows(from, to) {
       arrivalTime: clean(inv.arrivalTime) || null,
       departureTime: clean(inv.departureTime) || null,
       total: Number(inv.total || 0),
+      serviceNotes: clean(inv.serviceNotes) || clean(inv.invoiceDetails && inv.invoiceDetails.serviceNotes) || null,
       categories: cats,
       lineItems: inv.lineItems || [],
     };
@@ -172,7 +181,7 @@ async function buildRows(from, to) {
       routeId: s.rc,
       stopSequence: s.seq,
       technicianId: s.rc,
-      technicianType: null,
+      serviceNotes: s.serviceNotes,
       checkIn: s.arrivalTime,
       checkOut: s.departureTime,
       travelMinutes: s.travelMinutes != null ? s.travelMinutes : null,
@@ -183,7 +192,7 @@ async function buildRows(from, to) {
       revenueAmount: round(s.total),
       chemicalSupplyCost: null,
       accountStatus: s.cid ? (statusById.get(s.cid) || null) : null,
-      statusDate: null,
+      statusDate: (a && a.activity && a.activity[0]) ? activityDateKey(a.activity[0].timestamp) : null,
       billingCadence: frequency,
       billingAmount,
     };

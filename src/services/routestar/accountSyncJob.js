@@ -32,7 +32,7 @@ function startSync({ all = false } = {}) {
       log.error(`account sync failed: ${e.message}`);
     } finally {
       job.running = false; job.finishedAt = new Date().toISOString();
-      try { require('../../api/controllers/reference.controller').invalidateCustomers(); } catch (e) { /* ignore */ }
+      try { require('../../api/controllers/reference.controller').invalidateCustomers(); } catch (e) { void e; }
       await recordFinish(runId, {
         status: job.phase === 'error' ? 'error' : 'done',
         summary: { discovered: job.discovered, total: job.total, stored: job.stored, withAccount: job.withAccount, all: job.all },

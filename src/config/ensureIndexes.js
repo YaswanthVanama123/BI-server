@@ -15,9 +15,10 @@ async function ensureSourceIndexes() {
       { status: 1 },
       { invoiceType: 1, dateCompleted: 1 },
       { status: 1, dateCompleted: 1 },
+      { 'customer.link': 1 },
     ];
     for (const s of specs) await coll.createIndex(s);
-    log.info('ensured indexes on routestarinvoices (dateCompleted, invoiceDate, invoiceType, status)');
+    log.info('ensured indexes on routestarinvoices (dateCompleted, invoiceDate, invoiceType, status, customer.link)');
   } catch (e) {
     log.warn(`could not create routestarinvoices indexes: ${e.message}`);
     log.warn('run these on inventory_db with a write-capable user for fast queries: db.routestarinvoices.createIndex({dateCompleted:1}); createIndex({invoiceDate:1}); createIndex({invoiceType:1}); createIndex({status:1})');

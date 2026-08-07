@@ -16,17 +16,10 @@ async function selectMissing({ all = false, limit } = {}) {
     .find({}, { projection: { customerId: 1, name: 1, customerName: 1 } }).toArray();
   const captured = await CustomerAccount.find({}, { customerId: 1, customerName: 1 }).lean();
 
-  // Universe = every customer we know about — from the source import AND from
-  // bi_customeraccounts (which includes everyone discovered from the live grid).
   const nameById = new Map();
   for (const c of srcCustomers) if (c.customerId) nameById.set(c.customerId, c.customerName || c.name || null);
   for (const c of captured) if (c.customerId && !nameById.has(c.customerId)) nameById.set(c.customerId, c.customerName || null);
 
-  // "Has data" = an account number was captured. The account # reads reliably now,
-  // so a customer missing it either was fetched before the timing fix (grabbed
-  // pricing/routes but missed the account #) or is genuinely new — either way we
-  // re-fetch it to fill the account #. Existing pricing/routes/activity are never
-  // wiped on re-fetch (see the empty-tab guard in fetchMissingAccounts).
   const done = new Set();
   if (!all) {
     const withData = await CustomerAccount.find(
@@ -43,10 +36,6 @@ async function selectMissing({ all = false, limit } = {}) {
   return list;
 }
 
-// Step 1: walk the ENTIRE live RouteStar customers grid (all pages, high level)
-// and reconcile with bi_customeraccounts — create a stub for anyone new, update
-// (refresh created date) anyone already present. This whole pass finishes before
-// we fetch any detail, so the full customer universe is known first.
 async function discoverAllCustomers(service, onProgress) {
   const existing = await CustomerAccount.find({}, { customerId: 1 }).lean();
   const have = new Set(existing.map((d) => d.customerId));
@@ -113,9 +102,6 @@ async function fetchMissingAccounts({ all = false, limit, batchSize = 5, discove
           chunkActivity += (rec.activity || []).length;
           const set = { ...rec };
           if (runId) set.lastFetchRunId = runId;
-          // Protect previously-captured tab data: if a tab came back empty this
-          // run (e.g. the grid failed to load), don't overwrite existing rows
-          // with []. Only write a tab when we actually captured something.
           if (!set.pricing || !set.pricing.length) delete set.pricing;
           if (!set.routes || !set.routes.length) delete set.routes;
           if (!set.activity || !set.activity.length) delete set.activity;

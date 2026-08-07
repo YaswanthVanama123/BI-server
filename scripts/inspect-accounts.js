@@ -17,7 +17,6 @@ const { CustomerAccount } = models;
   const statusNoAcct = await CustomerAccount.countDocuments({ status: 'no_account' });
   const statusErr = await CustomerAccount.countDocuments({ status: 'error' });
 
-  // fetched but no tab data at all (empty pricing AND routes AND activity)
   const fetchedButEmpty = await CustomerAccount.countDocuments({
     fetchedAt: { $ne: null },
     $and: [

@@ -13,7 +13,6 @@ function createApp() {
   const allowAllOrigins = env.api.corsOrigins.includes('*');
   app.use(cors({
     origin(origin, cb) {
-      // No Origin header = non-browser client (RN mobile app, curl, server-to-server) — always allow.
       if (!origin || allowAllOrigins || env.api.corsOrigins.includes(origin)) return cb(null, true);
       return cb(null, false);
     },

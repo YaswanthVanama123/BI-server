@@ -9,8 +9,6 @@ async function val(page, sel) {
   return page.$eval(sel, (el) => (el.value != null ? el.value : el.textContent) || '').then((v) => clean(v)).catch(() => null);
 }
 
-// The customer form is populated by an async request after the page shell renders,
-// so an empty field may just mean "not loaded yet". Poll until it has a value.
 async function waitForFieldValue(page, sel, timeout = 12000) {
   const start = Date.now();
   let v = await val(page, sel);
@@ -94,13 +92,10 @@ async function fetchTab(page, log, { name, tabLink, pane, holderSel, headerSel, 
     try { await linkEl.evaluate((el) => el.click()); } catch (e2) { log.warn(`  [${name}] JS click failed: ${e2.message}`); }
   }
   await page.waitForTimeout(800);
-  // The tabs are Handsontable grids that only (re)load/render once shown. Clicking
-  // the tab via automation doesn't always trigger RouteStar's load, so explicitly
-  // call its grid-refresh function and fire a resize to force a re-render.
   const refreshed = await page.evaluate((fn) => {
     let ok = false;
-    if (fn && typeof window[fn] === 'function') { try { window[fn](); ok = true; } catch (e) { /* ignore */ } }
-    try { window.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
+    if (fn && typeof window[fn] === 'function') { try { window[fn](); ok = true; } catch (e) { void e; } }
+    try { window.dispatchEvent(new Event('resize')); } catch (e) { void e; }
     return ok;
   }, refreshFn).catch(() => false);
   if (refreshFn) log.info(`  [${name}] ${refreshFn}() ${refreshed ? 'called' : 'unavailable'} + resize`);
@@ -108,8 +103,6 @@ async function fetchTab(page, log, { name, tabLink, pane, holderSel, headerSel, 
     const paneActive = await page.$eval(pane, (el) => el.classList.contains('active') || el.offsetParent !== null).catch(() => false);
     log.info(`  [${name}] pane ${pane} ${paneActive ? 'active/visible' : 'NOT active'}`);
   }
-  // Poll for real data rows — the "Choose.." placeholder row appears instantly, but
-  // actual pricing/routes/activity rows arrive asynchronously after the grid loads.
   const start = Date.now();
   let gotData = false;
   while (Date.now() - start < 8000) {

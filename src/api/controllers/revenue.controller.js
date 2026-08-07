@@ -313,6 +313,8 @@ async function drillData(from, to, { routeCode, customerId, category, frequency 
   if (routeCode === '(UNASSIGNED)') and.push({ $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }, { assignedTo: '' }] });
   else if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
 
+  if (customerId) and.push({ 'customer.link': new RegExp(`customerdetail/${escapeRegex(customerId)}(?:[/?#]|$)`, 'i') });
+
   const wantKey = category ? itemKey(category) : null;
   const freqFilter = frequency ? String(frequency) : null;
   const NONE = '(none)';

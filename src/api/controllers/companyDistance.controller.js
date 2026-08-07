@@ -143,7 +143,7 @@ async function warm() {
   try {
     const tenant = await ensureTenant(null);
     await Promise.all([kpiCounts(tenant._id), loadOptions(tenant._id)]);
-  } catch (e) { /* db not ready yet */ }
+  } catch (e) { void e; }
 }
 
 function startWarmer() {

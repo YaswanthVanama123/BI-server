@@ -11,8 +11,6 @@ const { CustomerPricingItem, Employee, ServiceCategory, CustomerAccount, SyncRun
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const toDayKey = (d) => { if (!d) return null; const dt = new Date(d); return Number.isNaN(dt.getTime()) ? null : dt.toISOString().slice(0, 10); };
-// RouteStar's source onRoute field is sometimes the literal string "Empty"/"None"/
-// "Choose.." — treat those as no value so the actual captured route wins.
 const routeToken = (v) => { const s = clean(v); return s && !/^(empty|none|choose)/i.test(s) ? s : null; };
 
 function mapStatus(c) {
@@ -75,9 +73,6 @@ async function getAllCustomers() {
     const an = clean(a.customerName) || clean(a.company);
     if (an) acctNameByCust.set(a.customerId, an);
   }
-  // Universe = every customer from the source import UNION everyone stored in
-  // bi_customeraccounts (which includes customers discovered from the live grid
-  // that aren't in the source import yet), so they all appear in the list.
   const docById = new Map(docs.map((c) => [c.customerId, c]));
   const allIds = new Set(docById.keys());
   for (const a of accts) if (a.customerId) allIds.add(a.customerId);
