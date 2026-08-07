@@ -22,18 +22,17 @@ async function selectMissing({ all = false, limit } = {}) {
   for (const c of srcCustomers) if (c.customerId) nameById.set(c.customerId, c.customerName || c.name || null);
   for (const c of captured) if (c.customerId && !nameById.has(c.customerId)) nameById.set(c.customerId, c.customerName || null);
 
-  // "Has data" = the service detail was actually captured — at least one pricing
-  // OR routes row. An account number or activity alone does NOT count, because a
-  // customer can have an account # but still be missing its pricing/routes tabs
-  // (e.g. an earlier fetch that failed those tabs) — we want those re-fetched.
+  // "Has data" = an account number was captured. The account # reads reliably now,
+  // so a customer missing it either was fetched before the timing fix (grabbed
+  // pricing/routes but missed the account #) or is genuinely new — either way we
+  // re-fetch it to fill the account #. Existing pricing/routes/activity are never
+  // wiped on re-fetch (see the empty-tab guard in fetchMissingAccounts).
   const done = new Set();
   if (!all) {
-    const withData = await CustomerAccount.find({
-      $or: [
-        { 'pricing.0': { $exists: true } },
-        { 'routes.0': { $exists: true } },
-      ],
-    }, { customerId: 1 }).lean();
+    const withData = await CustomerAccount.find(
+      { accountNumber: { $nin: [null, ''] } },
+      { customerId: 1 },
+    ).lean();
     for (const d of withData) if (d.customerId) done.add(d.customerId);
   }
 

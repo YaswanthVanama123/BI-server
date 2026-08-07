@@ -112,7 +112,7 @@ async function fetchTab(page, log, { name, tabLink, pane, holderSel, headerSel, 
   // actual pricing/routes/activity rows arrive asynchronously after the grid loads.
   const start = Date.now();
   let gotData = false;
-  while (Date.now() - start < 15000) {
+  while (Date.now() - start < 8000) {
     if (await hasDataRow(page, rowSel)) { gotData = true; break; }
     await page.waitForTimeout(500);
   }
