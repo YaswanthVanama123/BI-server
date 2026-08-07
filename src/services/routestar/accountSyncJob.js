@@ -12,14 +12,16 @@ function isRunning() { return !!(job && job.running); }
 
 function startSync({ all = false } = {}) {
   if (job && job.running) return { started: false, already: true, job: { ...job } };
-  job = { running: true, phase: 'discovering', all: !!all, startedAt: new Date().toISOString(), finishedAt: null, discovered: 0, scanned: 0, total: 0, stored: 0, withAccount: 0, error: null };
+  job = { running: true, phase: 'discovering', all: !!all, runId: null, startedAt: new Date().toISOString(), finishedAt: null, discovered: 0, scanned: 0, total: 0, stored: 0, withAccount: 0, error: null };
 
   (async () => {
     const runId = await recordStart('customer-accounts', 'Customer account fetch');
+    job.runId = runId ? String(runId) : null;
     try {
       const r = await fetchMissingAccounts({
         all,
         batchSize: 5,
+        runId: job.runId,
         onDiscover: (p) => { job.phase = 'discovering'; job.scanned = p.scanned; job.discovered = p.added; },
         onProgress: (p) => { job.phase = 'fetching'; job.total = p.total; job.stored = p.stored; job.withAccount = p.withAccount; if (p.discovered != null) job.discovered = p.discovered; },
       });

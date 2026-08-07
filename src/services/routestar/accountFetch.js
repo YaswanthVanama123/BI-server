@@ -14,7 +14,7 @@ async function selectMissing({ all = false, limit } = {}) {
   const src = getSourceDb();
   const srcCustomers = await src.collection('routestarcustomers')
     .find({}, { projection: { customerId: 1, name: 1, customerName: 1 } }).toArray();
-  const captured = await CustomerAccount.find({}, { customerId: 1, customerName: 1, fetchedAt: 1 }).lean();
+  const captured = await CustomerAccount.find({}, { customerId: 1, customerName: 1 }).lean();
 
   // Universe = every customer we know about — from the source import AND from
   // bi_customeraccounts (which includes everyone discovered from the live grid).
@@ -22,9 +22,20 @@ async function selectMissing({ all = false, limit } = {}) {
   for (const c of srcCustomers) if (c.customerId) nameById.set(c.customerId, c.customerName || c.name || null);
   for (const c of captured) if (c.customerId && !nameById.has(c.customerId)) nameById.set(c.customerId, c.customerName || null);
 
-  // "Has data" = this customer's detail page was already fetched (fetchedAt set).
+  // "Has data" = the service detail was actually captured — at least one pricing
+  // OR routes row. An account number or activity alone does NOT count, because a
+  // customer can have an account # but still be missing its pricing/routes tabs
+  // (e.g. an earlier fetch that failed those tabs) — we want those re-fetched.
   const done = new Set();
-  if (!all) for (const c of captured) if (c.customerId && c.fetchedAt) done.add(c.customerId);
+  if (!all) {
+    const withData = await CustomerAccount.find({
+      $or: [
+        { 'pricing.0': { $exists: true } },
+        { 'routes.0': { $exists: true } },
+      ],
+    }, { customerId: 1 }).lean();
+    for (const d of withData) if (d.customerId) done.add(d.customerId);
+  }
 
   let list = [...nameById.keys()]
     .filter((id) => all || !done.has(id))
@@ -62,47 +73,71 @@ async function discoverAllCustomers(service, onProgress) {
   return { scanned, added, updated };
 }
 
-async function fetchMissingAccounts({ all = false, limit, batchSize = 5, discover = true, onProgress, onDiscover } = {}) {
+async function fetchMissingAccounts({ all = false, limit, batchSize = 5, discover = true, runId = null, ids = null, onProgress, onDiscover } = {}) {
   const service = new RouteStarService();
   let stored = 0; let withAccount = 0; let discovered = 0; let total = 0;
+  let totPricing = 0; let totRoutes = 0; let totActivity = 0;
   try {
     await service.open();
 
-    if (discover) {
-      const d = await discoverAllCustomers(service, (p) => { if (onDiscover) onDiscover(p); });
-      discovered = d.added;
+    let toFetch;
+    if (ids && ids.length) {
+      toFetch = ids.map((id) => ({ customerId: id, customerName: null }));
+      log.info(`targeted fetch: ${toFetch.length} explicit customer id(s), skipping discovery`);
+    } else {
+      if (discover) {
+        log.info('phase 1: discovering all customers from the live grid…');
+        const d = await discoverAllCustomers(service, (p) => { if (onDiscover) onDiscover(p); });
+        discovered = d.added;
+        log.info(`phase 1 done: scanned ${d.scanned}, ${d.added} new, ${d.updated} existing`);
+      }
+      toFetch = await selectMissing({ all, limit });
     }
-
-    const toFetch = await selectMissing({ all, limit });
     total = toFetch.length;
-    log.info(`account fetch: ${total} customer(s) need detail (${all ? 'all' : 'missing only'})`);
+    log.info(`phase 2: ${total} customer(s) to fetch detail (${ids && ids.length ? 'targeted' : all ? 'all' : 'missing only'})`);
+    if (total && !(ids && ids.length)) log.info(`  need-detail sample: ${toFetch.slice(0, 10).map((c) => c.customerId).join(', ')}${total > 10 ? ` …(+${total - 10} more)` : ''}`);
     if (onProgress) onProgress({ total, stored: 0, withAccount: 0, discovered });
-    if (!total) return { total, stored, withAccount, discovered };
+    if (!total) { log.info('nothing to fetch — every known customer already has data.'); return { total, stored, withAccount, discovered }; }
 
     for (let i = 0; i < toFetch.length; i += batchSize) {
       const chunk = toFetch.slice(i, i + batchSize);
+      log.info(`batch ${Math.floor(i / batchSize) + 1}: fetching ${chunk.length} customer(s) [${i + 1}-${i + chunk.length} of ${total}]`);
       let ops = [];
-      let chunkWithAccount = 0;
+      let chunkWithAccount = 0; let chunkPricing = 0; let chunkRoutes = 0; let chunkActivity = 0;
       await service.fetchCustomerAccounts({
         customers: chunk,
         accumulate: false,
         onResult: (rec) => {
           if (rec.accountNumber) chunkWithAccount += 1;
-          ops.push({ updateOne: { filter: { customerId: rec.customerId }, update: { $set: rec }, upsert: true } });
+          chunkPricing += (rec.pricing || []).length;
+          chunkRoutes += (rec.routes || []).length;
+          chunkActivity += (rec.activity || []).length;
+          const set = { ...rec };
+          if (runId) set.lastFetchRunId = runId;
+          // Protect previously-captured tab data: if a tab came back empty this
+          // run (e.g. the grid failed to load), don't overwrite existing rows
+          // with []. Only write a tab when we actually captured something.
+          if (!set.pricing || !set.pricing.length) delete set.pricing;
+          if (!set.routes || !set.routes.length) delete set.routes;
+          if (!set.activity || !set.activity.length) delete set.activity;
+          ops.push({ updateOne: { filter: { customerId: rec.customerId }, update: { $set: set }, upsert: true } });
         },
       });
       if (ops.length) {
-        await CustomerAccount.bulkWrite(ops, { ordered: false });
+        const res = await CustomerAccount.bulkWrite(ops, { ordered: false });
         stored += ops.length;
         withAccount += chunkWithAccount;
+        totPricing += chunkPricing; totRoutes += chunkRoutes; totActivity += chunkActivity;
+        log.info(`  bulkWrite: matched=${res.matchedCount} modified=${res.modifiedCount} upserted=${res.upsertedCount} · batch tabs pricing=${chunkPricing} routes=${chunkRoutes} activity=${chunkActivity}`);
       }
       ops = null;
       if (onProgress) onProgress({ total, stored, withAccount, discovered });
-      log.info(`stored ${stored}/${total}`);
+      log.info(`stored ${stored}/${total} (running totals: pricing=${totPricing} routes=${totRoutes} activity=${totActivity})`);
     }
   } finally {
     await service.close();
   }
+  log.info(`fetch complete: discovered=${discovered} detailFetched=${stored}/${total} withAccount=${withAccount} · captured pricing=${totPricing} routes=${totRoutes} activity=${totActivity}`);
   return { total, stored, withAccount, discovered };
 }
 

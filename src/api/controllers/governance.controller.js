@@ -110,7 +110,7 @@ async function syncStatus(req, res) {
       history = await SyncRun.find({}).sort({ startedAt: -1 }).limit(50).lean();
     } catch { history = []; }
     history = history.map((h) => ({
-      type: h.type, label: h.label || h.type, status: h.status,
+      id: String(h._id), type: h.type, label: h.label || h.type, status: h.status,
       startedAt: h.startedAt, finishedAt: h.finishedAt || null,
       durationMs: h.durationMs != null ? h.durationMs : null,
       summary: h.summary || null, error: h.error || null,

@@ -9,6 +9,18 @@ async function val(page, sel) {
   return page.$eval(sel, (el) => (el.value != null ? el.value : el.textContent) || '').then((v) => clean(v)).catch(() => null);
 }
 
+// The customer form is populated by an async request after the page shell renders,
+// so an empty field may just mean "not loaded yet". Poll until it has a value.
+async function waitForFieldValue(page, sel, timeout = 12000) {
+  const start = Date.now();
+  let v = await val(page, sel);
+  while (!v && Date.now() - start < timeout) {
+    await page.waitForTimeout(500);
+    v = await val(page, sel);
+  }
+  return v;
+}
+
 async function readVisibleRows(page, headerSel, rowSel) {
   const headers = await page.$$eval(headerSel, (ths) => ths.map((th) => th.textContent.replace(/▼/g, '').trim())).catch(() => []);
   const rows = await page.$$eval(rowSel, (trs) => trs.map((tr) => Array.from(tr.querySelectorAll('td')).map((td) => td.textContent.replace(/▼/g, '').trim()))).catch(() => []);
@@ -59,6 +71,70 @@ async function extractAllRows(page, { holderSel, headerSel, rowSel }) {
   return out;
 }
 
+async function countVisibleRows(page, rowSel) {
+  return page.$$eval(rowSel, (trs) => trs.filter((tr) => tr.querySelectorAll('td').length).length).catch(() => -1);
+}
+
+async function hasDataRow(page, rowSel) {
+  return page.$$eval(rowSel, (trs) => trs.some((tr) => Array.from(tr.querySelectorAll('td')).some((td) => {
+    const t = (td.textContent || '').replace(/▼/g, '').trim();
+    return t && t !== 'Choose..';
+  }))).catch(() => false);
+}
+
+async function fetchTab(page, log, { name, tabLink, pane, holderSel, headerSel, rowSel, refreshFn }) {
+  const linkEl = await page.$(tabLink).catch(() => null);
+  log.info(`  [${name}] tab link ${linkEl ? 'found' : 'NOT FOUND'} (${tabLink})`);
+  if (!linkEl) return [];
+  try {
+    await page.click(tabLink, { timeout: 5000 });
+    log.info(`  [${name}] clicked tab`);
+  } catch (e) {
+    log.warn(`  [${name}] tab click failed (${e.message}) — trying JS click`);
+    try { await linkEl.evaluate((el) => el.click()); } catch (e2) { log.warn(`  [${name}] JS click failed: ${e2.message}`); }
+  }
+  await page.waitForTimeout(800);
+  // The tabs are Handsontable grids that only (re)load/render once shown. Clicking
+  // the tab via automation doesn't always trigger RouteStar's load, so explicitly
+  // call its grid-refresh function and fire a resize to force a re-render.
+  const refreshed = await page.evaluate((fn) => {
+    let ok = false;
+    if (fn && typeof window[fn] === 'function') { try { window[fn](); ok = true; } catch (e) { /* ignore */ } }
+    try { window.dispatchEvent(new Event('resize')); } catch (e) { /* ignore */ }
+    return ok;
+  }, refreshFn).catch(() => false);
+  if (refreshFn) log.info(`  [${name}] ${refreshFn}() ${refreshed ? 'called' : 'unavailable'} + resize`);
+  if (pane) {
+    const paneActive = await page.$eval(pane, (el) => el.classList.contains('active') || el.offsetParent !== null).catch(() => false);
+    log.info(`  [${name}] pane ${pane} ${paneActive ? 'active/visible' : 'NOT active'}`);
+  }
+  // Poll for real data rows — the "Choose.." placeholder row appears instantly, but
+  // actual pricing/routes/activity rows arrive asynchronously after the grid loads.
+  const start = Date.now();
+  let gotData = false;
+  while (Date.now() - start < 15000) {
+    if (await hasDataRow(page, rowSel)) { gotData = true; break; }
+    await page.waitForTimeout(500);
+  }
+  const rawCount = await countVisibleRows(page, rowSel);
+  log.info(`  [${name}] dataRow=${gotData} after ${Date.now() - start}ms; visible data <tr>=${rawCount}`);
+  if (rawCount > 0) {
+    const sample = await page.$$eval(rowSel, (trs) => {
+      const first = trs.find((tr) => tr.querySelectorAll('td').length);
+      return first ? Array.from(first.querySelectorAll('td')).map((td) => (td.textContent || '').replace(/▼/g, '').trim()) : [];
+    }).catch(() => []);
+    log.info(`  [${name}] first row cells: ${JSON.stringify(sample)}`);
+  }
+  let rows = [];
+  try {
+    rows = await extractAllRows(page, { holderSel, headerSel, rowSel });
+  } catch (e) {
+    log.warn(`  [${name}] extractAllRows threw: ${e.message}`);
+  }
+  log.info(`  [${name}] extracted ${rows.length} unique row object(s)`);
+  return rows;
+}
+
 function mapPricing(rowObjs) {
   return rowObjs
     .map((o) => ({
@@ -93,13 +169,16 @@ async function fetchCustomerAccounts({ session, navigator }, { customers = [], o
     const c = customers[i];
     const rec = { customerId: c.customerId, customerName: c.customerName || null, detailUrl: navigator.url('customerDetail', c.customerId), status: 'ok', fetchedAt: new Date() };
     try {
-      log.info(`[${i + 1}/${customers.length}] ${c.customerName || c.customerId}`);
+      log.info(`[${i + 1}/${customers.length}] ${c.customerName || c.customerId} (id=${c.customerId})`);
       await session.withRetry(async () => {
         await navigator.gotoCustomerDetail(c.customerId);
         await page.waitForSelector(sel.accountNumber, { timeout: 30000 });
       }, 'open customer detail');
 
-      rec.accountNumber = await val(page, sel.accountNumber);
+      const acctFieldFound = await page.$(sel.accountNumber).then((el) => !!el).catch(() => false);
+      rec.accountNumber = await waitForFieldValue(page, sel.accountNumber, 12000);
+      log.info(`  loaded detail url=${page.url()} · accountField=${acctFieldFound ? 'yes' : 'NO'} · account=${rec.accountNumber || '(none)'}`);
+
       rec.company = await val(page, sel.company);
       rec.serviceAddress1 = await val(page, sel.serviceAddress1);
       rec.serviceAddress2 = await val(page, sel.serviceAddress2);
@@ -112,42 +191,17 @@ async function fetchCustomerAccounts({ session, navigator }, { customers = [], o
       rec.zone = await val(page, sel.zone);
       if (!rec.accountNumber) rec.status = 'no_account';
 
-      try {
-        await page.click(sel.pricingTabLink, { timeout: 5000 });
-        await page.waitForTimeout(2500);
-        await page.waitForSelector(sel.pricingRows, { timeout: 15000 }).catch(() => {});
-        rec.pricing = mapPricing(await extractAllRows(page, { holderSel: sel.pricingHolder, headerSel: sel.pricingHeaders, rowSel: sel.pricingRows }));
-        log.info(`  account=${rec.accountNumber || '(none)'} pricing rows=${rec.pricing.length}`);
-      } catch (e) {
-        rec.pricing = [];
-        log.warn(`  pricing extract failed: ${e.message}`);
-      }
-
-      try {
-        await page.click(sel.routesTabLink, { timeout: 5000 });
-        await page.waitForTimeout(2500);
-        await page.waitForSelector(sel.routeRows, { timeout: 15000 }).catch(() => {});
-        rec.routes = await extractAllRows(page, { holderSel: sel.routesHolder, headerSel: sel.routeHeaders, rowSel: sel.routeRows });
-        log.info(`  route rows=${rec.routes.length}`);
-      } catch (e) {
-        rec.routes = [];
-        log.warn(`  routes extract failed: ${e.message}`);
-      }
-
-      try {
-        await page.click(sel.activityTabLink, { timeout: 5000 });
-        await page.waitForTimeout(2500);
-        await page.waitForSelector(sel.activityRows, { timeout: 15000 }).catch(() => {});
-        rec.activity = mapActivity(await extractAllRows(page, { holderSel: sel.activityHolder, headerSel: sel.activityHeaders, rowSel: sel.activityRows }));
-        log.info(`  activity rows=${rec.activity.length}`);
-      } catch (e) {
-        rec.activity = [];
-        log.warn(`  activity extract failed: ${e.message}`);
-      }
+      rec.pricing = mapPricing(await fetchTab(page, log, { name: 'pricing', tabLink: sel.pricingTabLink, pane: sel.pricingPane, holderSel: sel.pricingHolder, headerSel: sel.pricingHeaders, rowSel: sel.pricingRows, refreshFn: 'refresh_PricingGrid' }));
+      rec.routes = await fetchTab(page, log, { name: 'routes', tabLink: sel.routesTabLink, pane: sel.routesPane, holderSel: sel.routesHolder, headerSel: sel.routeHeaders, rowSel: sel.routeRows, refreshFn: 'refresh_RouteGrid' });
+      rec.activity = mapActivity(await fetchTab(page, log, { name: 'activity', tabLink: sel.activityTabLink, pane: sel.activityPane, holderSel: sel.activityHolder, headerSel: sel.activityHeaders, rowSel: sel.activityRows, refreshFn: 'refresh_ActivityGrid' }));
+      log.info(`  => STORED account=${rec.accountNumber || '(none)'} pricing=${rec.pricing.length} routes=${rec.routes.length} activity=${rec.activity.length} status=${rec.status}`);
     } catch (e) {
       rec.status = 'error';
       rec.error = e.message;
-      log.warn(`  failed: ${e.message}`);
+      rec.pricing = rec.pricing || [];
+      rec.routes = rec.routes || [];
+      rec.activity = rec.activity || [];
+      log.warn(`  FAILED ${c.customerId}: ${e.message}`);
     }
     results.push(accumulate ? rec : rec.customerId);
     if (onResult) { try { await onResult(rec); } catch (e) { log.warn(`onResult error: ${e.message}`); } }

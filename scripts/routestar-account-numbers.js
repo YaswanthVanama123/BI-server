@@ -10,6 +10,8 @@ const { fetchMissingAccounts } = require('../src/services/routestar/accountFetch
     all: !!args.all,
     limit: args.limit ? Number(args.limit) : undefined,
     batchSize: args.batch ? Number(args.batch) : 5,
+    discover: !args['no-discover'],
+    ids: args.id ? String(args.id).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
   });
   console.log(`done: ${r.stored}/${r.total} stored (${r.withAccount} with an account number).`);
   await disconnectDatabase();

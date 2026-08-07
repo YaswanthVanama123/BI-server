@@ -41,8 +41,10 @@ const customerAccountSchema = new Schema({
   status: { type: String, enum: ['ok', 'no_account', 'error'], default: 'ok' },
   error: { type: String },
   fetchedAt: { type: Date },
+  lastFetchRunId: { type: String, default: null },
 }, baseOptions);
 customerAccountSchema.index({ accountNumber: 1 });
+customerAccountSchema.index({ lastFetchRunId: 1 });
 
 module.exports = {
   CustomerAccount: mongoose.model('CustomerAccount', customerAccountSchema),

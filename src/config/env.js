@@ -32,7 +32,7 @@ const env = {
   },
 
   browser: {
-    headless: !(process.env.HEADLESS === 'false' && !!process.env.DISPLAY),
+    headless: process.env.HEADLESS !== 'false',
     timeout: num(process.env.BROWSER_TIMEOUT, 60000),
     screenshotDir: process.env.SCREENSHOT_DIR || 'screenshots/routestar',
   },

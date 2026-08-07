@@ -7,10 +7,13 @@ const { startSync, snapshot } = require('../../services/routestar/accountSyncJob
 const createdDateJob = require('../../services/routestar/createdDateSyncJob');
 const { dec } = require('./_dims');
 
-const { CustomerPricingItem, Employee, ServiceCategory, CustomerAccount } = models;
+const { CustomerPricingItem, Employee, ServiceCategory, CustomerAccount, SyncRun } = models;
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const toDayKey = (d) => { if (!d) return null; const dt = new Date(d); return Number.isNaN(dt.getTime()) ? null : dt.toISOString().slice(0, 10); };
+// RouteStar's source onRoute field is sometimes the literal string "Empty"/"None"/
+// "Choose.." — treat those as no value so the actual captured route wins.
+const routeToken = (v) => { const s = clean(v); return s && !/^(empty|none|choose)/i.test(s) ? s : null; };
 
 function mapStatus(c) {
   const name = `${c.customerName || ''} ${c.company || ''}`.trim();
@@ -87,8 +90,8 @@ async function getAllCustomers() {
       routeStarAccountNumber: (c && clean(c.accountNumber)) || acctAccountByCust.get(id) || null,
       customerName: name,
       customerStatus: c ? mapStatus(c) : mapStatus({ customerName: name }),
-      routeCode: (c && clean(c.onRoute)) || routeByCust.get(id) || acctRouteByCust.get(id) || null,
-      frequency: freqByCust.get(id) || acctFreqByCust.get(id) || null,
+      routeCode: acctRouteByCust.get(id) || routeByCust.get(id) || routeToken(c && c.onRoute) || null,
+      frequency: acctFreqByCust.get(id) || freqByCust.get(id) || null,
       createdDate: (c && toDayKey(c.createdDate)) || toDayKey(acctCreatedByCust.get(id)),
     };
   });
@@ -244,6 +247,45 @@ async function accountSyncStatus(req, res) {
   res.json(buildEnvelope(snapshot()));
 }
 
+async function accountFetchRows(req, res) {
+  let runId = clean(req.query.runId) || null;
+  let run = null;
+  if (runId) {
+    run = await SyncRun.findById(runId).lean().catch(() => null);
+  } else {
+    run = await SyncRun.findOne({ type: 'customer-accounts' }).sort({ startedAt: -1 }).lean();
+    runId = run ? String(run._id) : null;
+  }
+  const match = runId ? { lastFetchRunId: runId } : { lastFetchRunId: { $ne: null } };
+  const docs = await CustomerAccount.aggregate([
+    { $match: match },
+    { $project: {
+      _id: 0, customerId: 1, customerName: 1, company: 1, accountNumber: 1, status: 1, fetchedAt: 1,
+      pricingCount: { $size: { $ifNull: ['$pricing', []] } },
+      routesCount: { $size: { $ifNull: ['$routes', []] } },
+      activityCount: { $size: { $ifNull: ['$activity', []] } },
+    } },
+  ]);
+  const rows = docs.map((d) => ({
+    customerId: d.customerId,
+    customerName: clean(d.customerName) || clean(d.company) || '(unknown)',
+    accountNumber: clean(d.accountNumber) || null,
+    pricingCount: d.pricingCount || 0,
+    routesCount: d.routesCount || 0,
+    activityCount: d.activityCount || 0,
+    status: d.status || null,
+    fetchedAt: d.fetchedAt || null,
+  }));
+  rows.sort((a, b) => String(a.customerName).localeCompare(String(b.customerName)));
+  const total = rows.length;
+  const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 1000 });
+  const pageRows = sliceArray(rows, paging);
+  res.json(buildEnvelope(pageRows, {
+    meta: { runId, run: run ? { startedAt: run.startedAt, finishedAt: run.finishedAt, status: run.status, summary: run.summary } : null, total },
+    page: pageMeta(total, paging, pageRows.length),
+  }));
+}
+
 async function deleteAllAccounts(req, res) {
   const snap = snapshot();
   if (snap && snap.running) {
@@ -266,4 +308,4 @@ async function createdDateSyncStatus(req, res) {
   res.json(buildEnvelope(createdDateJob.snapshot()));
 }
 
-module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, deleteAllAccounts, createdDateSync, createdDateSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };
+module.exports = { customers, customerPricing, customerAccount, accountSync, accountSyncStatus, accountFetchRows, deleteAllAccounts, createdDateSync, createdDateSyncStatus, routes, employees, serviceCategories, warm, startWarmer, invalidateCustomers };

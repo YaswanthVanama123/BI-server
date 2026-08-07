@@ -10,6 +10,7 @@
     "sync-indexes": "node scripts/sync-indexes.js",
     "seed": "node scripts/seed.js",
     "source:inspect": "node scripts/inspect-source.js",
+    "inspect:accounts": "node scripts/inspect-accounts.js",
     "status": "node scripts/status.js",
     "import:customers": "node scripts/import-inventory-customers.js",
     "import:routes": "node scripts/import-inventory-routes.js",

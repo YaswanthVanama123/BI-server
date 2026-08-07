@@ -6,6 +6,7 @@ const wrap = require('../middleware/asyncHandler');
 router.get('/customers', wrap(c.customers));
 router.post('/customers/accounts/sync', wrap(c.accountSync));
 router.get('/customers/accounts/sync/status', wrap(c.accountSyncStatus));
+router.get('/customers/accounts/rows', wrap(c.accountFetchRows));
 router.delete('/customers/accounts', wrap(c.deleteAllAccounts));
 router.post('/customers/created-dates/sync', wrap(c.createdDateSync));
 router.get('/customers/created-dates/sync/status', wrap(c.createdDateSyncStatus));
