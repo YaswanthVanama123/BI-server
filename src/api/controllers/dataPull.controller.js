@@ -108,7 +108,7 @@ async function buildRows(from, to) {
 
   const invNums = invoices.map((i) => i.invoiceNumber).filter(Boolean);
   const [accts, custDocs, storedDocs, tid] = await Promise.all([
-    CustomerAccount.find({}, { customerId: 1, serviceAddress1: 1, serviceAddress2: 1, serviceAddress3: 1, serviceCity: 1, serviceState: 1, serviceZip: 1, pricing: 1, routes: 1, activity: { $slice: 1 } }).lean(),
+    CustomerAccount.find({}, { customerId: 1, accountNumber: 1, serviceAddress1: 1, serviceAddress2: 1, serviceAddress3: 1, serviceCity: 1, serviceState: 1, serviceZip: 1, pricing: 1, routes: 1, activity: { $slice: 1 } }).lean(),
     db.collection('routestarcustomers').find({}, { projection: { customerId: 1, customerName: 1, company: 1, status: 1, active: 1 } }).batchSize(5000).limit(20000).toArray(),
     InvoiceFrequency.find({ invoiceNumber: { $in: invNums } }, { invoiceNumber: 1, lines: 1 }).lean(),
     tenantId(),
@@ -176,6 +176,7 @@ async function buildRows(from, to) {
       serviceDate: s.dk,
       stopId: s.invoiceNumber,
       customerId: s.cid,
+      accountNumber: (a && clean(a.accountNumber)) || null,
       customerName: s.customerName,
       serviceAddress,
       routeId: s.rc,

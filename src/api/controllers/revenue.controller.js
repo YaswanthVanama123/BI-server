@@ -271,12 +271,24 @@ async function byRoute(req, res) {
   if (cached) { res.set('X-Cache', 'HIT'); return res.json(cached); }
   const { records } = await getReconciliation(from, to, routeCode);
   const map = new Map();
+  const custByRoute = new Map();
+  const row = (rt) => {
+    let o = map.get(rt);
+    if (!o) { o = { routeCode: rt, expected: 0, invoiced: 0, stops: 0 }; map.set(rt, o); custByRoute.set(rt, new Set()); }
+    return o;
+  };
   for (const r of records) {
-    const o = map.get(r.route) || { routeCode: r.route, expected: 0, invoiced: 0, stops: 0, customers: 0 };
-    o.expected += r.expected; o.invoiced += r.actual; o.stops += r.invoices.length; o.customers += 1; map.set(r.route, o);
+    for (const inv of r.invoices || []) {
+      const rt = inv.route || '(unassigned)';
+      const o = row(rt);
+      o.invoiced += Number(inv.total || 0);
+      o.stops += 1;
+      custByRoute.get(rt).add(r.customerId);
+    }
+    if (r.expected > 0) row(r.route || '(unassigned)').expected += r.expected;
   }
   const t = totals(records);
-  const rows = [...map.values()].map((o) => ({ routeCode: o.routeCode, expected: round(o.expected), invoiced: round(o.invoiced), remaining: round(o.expected - o.invoiced), stops: o.stops, customers: o.customers, pct: o.expected ? round((o.invoiced / o.expected) * 100, 1) : null }))
+  const rows = [...map.values()].map((o) => ({ routeCode: o.routeCode, expected: round(o.expected), invoiced: round(o.invoiced), remaining: round(o.expected - o.invoiced), stops: o.stops, customers: (custByRoute.get(o.routeCode) || new Set()).size, pct: o.expected ? round((o.invoiced / o.expected) * 100, 1) : null }))
     .sort((a, b) => b.invoiced - a.invoiced);
   const payload = buildEnvelope({ kpis: { ...t, routes: rows.length }, rows });
   payloadCache.set(pkey, payload);
