@@ -1,7 +1,7 @@
 'use strict';
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
-const { inFilterRange } = require('../lib/checkoutDate');
+const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
@@ -72,7 +72,7 @@ async function getAllStops(from, to) {
 
   const stops = [];
   for (const inv of invoices) {
-    const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
+    const dk = filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate);
     if (!dk) continue;
     if (from && dk < from) continue;
     if (to && dk > to) continue;

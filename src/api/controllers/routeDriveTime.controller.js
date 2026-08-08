@@ -3,7 +3,7 @@ const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
-const { inFilterRange } = require('../lib/checkoutDate');
+const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
 
 const { CompanyDistance, Tenant } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
@@ -70,7 +70,7 @@ async function getAllStops(from, to) {
 
   const stops = [];
   for (const d of docs) {
-    const dk = dayKey(d.dateCompleted || d.invoiceDate);
+    const dk = filterDayKey(d) || dayKey(d.dateCompleted || d.invoiceDate);
     if (!dk) continue;
     if (from && dk < from) continue;
     if (to && dk > to) continue;

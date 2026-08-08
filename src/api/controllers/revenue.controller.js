@@ -108,7 +108,7 @@ async function computeReconciliation(from, to) {
       a.actual += amt; r.actByItem.set(key, a);
     }
     r.actual += invTotal;
-    r.invoices.push({ invoiceNumber: inv.invoiceNumber, date: dayKey(inv.dateCompleted || inv.invoiceDate), total: Number(inv.total || 0), lineCount: (inv.lineItems || []).length, route: rc });
+    r.invoices.push({ invoiceNumber: inv.invoiceNumber, date: filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate), total: Number(inv.total || 0), lineCount: (inv.lineItems || []).length, route: rc });
   }
 
   const records = [];
@@ -247,7 +247,7 @@ async function categoryDetail(req, res) {
     if (wantRoute && (custRoute.get(cid) || '') !== wantRoute) continue;
     let amt = 0;
     for (const li of inv.lineItems || []) { if (itemKey(li.name) === wantKey) amt += Number(li.amount || 0); }
-    if (amt > 0) invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customer: (inv.customer && inv.customer.name) || '', date: dayKey(inv.dateCompleted || inv.invoiceDate), amount: round(amt) });
+    if (amt > 0) invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customer: (inv.customer && inv.customer.name) || '', date: filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate), amount: round(amt) });
   }
   for (const r of records) {
     const e = r.expByItem.get(wantKey);
@@ -380,7 +380,7 @@ async function drillData(from, to, { routeCode, customerId, category, frequency 
     const total = (wantKey || freqFilter) ? amt : Number(inv.total || 0);
     const c = custMap.get(cid) || { customerId: cid, customer: name, invoiced: 0, stops: 0 };
     c.invoiced += total; c.stops += 1; custMap.set(cid, c);
-    invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customerId: cid, customer: name, date: dayKey(inv.dateCompleted || inv.invoiceDate), checkIn: clean(inv.arrivalTime) || null, checkOut: clean(inv.departureTime) || null, total: round(total), lineCount: (wantKey || freqFilter) ? matched : lines.length });
+    invoiceRows.push({ invoiceNumber: inv.invoiceNumber, customerId: cid, customer: name, date: filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate), checkIn: clean(inv.arrivalTime) || null, checkOut: clean(inv.departureTime) || null, total: round(total), lineCount: (wantKey || freqFilter) ? matched : lines.length });
   }
   const customers = [...custMap.values()].map((c) => ({ customerId: c.customerId, customer: c.customer, invoiced: round(c.invoiced), stops: c.stops })).sort((a, b) => b.invoiced - a.invoiced);
   const items = [...itemMap.values()].map((i) => ({ item: i.item, category: i.category, qty: round(i.qty, 2), invoiced: round(i.invoiced), lines: i.lines })).sort((a, b) => b.invoiced - a.invoiced);

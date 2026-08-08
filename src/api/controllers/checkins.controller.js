@@ -2,7 +2,7 @@
 const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
-const { inFilterRange } = require('../lib/checkoutDate');
+const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
@@ -112,8 +112,7 @@ async function loadCheckins(from, to, route) {
     .toArray()).filter((d) => inFilterRange(d, from, to));
 
   const stops = docs.map((d) => {
-    const serviceDate = d.dateCompleted || d.invoiceDate;
-    const dk = dayKey(serviceDate);
+    const dk = filterDayKey(d) || dayKey(d.dateCompleted || d.invoiceDate);
     const arrTs = parseTs(d.arrivalTime, dk);
     const depTs = parseTs(d.departureTime, dk);
     let serviceMinutes = null;
@@ -126,7 +125,7 @@ async function loadCheckins(from, to, route) {
     return {
       route: (clean(d.assignedTo) ? String(d.assignedTo).trim().toUpperCase() : '(unassigned)'),
       dateKey: dk,
-      dateCompleted: d.dateCompleted || null,
+      dateCompleted: dk,
       invoiceNumber: d.invoiceNumber,
       customer: (d.customer && d.customer.name) || '',
       checkIn: clean(d.arrivalTime) || null,

@@ -3,7 +3,7 @@ const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
-const { inFilterRange } = require('../lib/checkoutDate');
+const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
 const { frequencyFor } = require('../../services/pricingMatch');
 
 const { CustomerAccount, CompanyDistance, InvoiceFrequency, Tenant } = models;
@@ -122,7 +122,7 @@ async function buildRows(from, to) {
   const stops = invoices.map((inv) => {
     const cid = customerIdFromLink(inv.customer && inv.customer.link) || null;
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    const dk = dayKey(inv.dateCompleted || inv.invoiceDate);
+    const dk = filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate);
     const cats = [...new Set((inv.lineItems || []).map((li) => categoryOf(li.name)).filter(Boolean))];
     return {
       cid, rc, dk,
