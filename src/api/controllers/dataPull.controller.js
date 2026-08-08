@@ -211,6 +211,13 @@ async function dataPull(req, res) {
   let rows = payloadCache.get(key);
   if (!rows) { rows = await buildRows(from, to); payloadCache.set(key, rows); }
 
+  const term = clean(req.query.q);
+  if (term) {
+    const t = String(term).toLowerCase();
+    rows = rows.filter((r) => [r.stopId, r.customerId, r.accountNumber, r.customerName, r.serviceAddress, r.routeId, r.technicianId, r.serviceCategory, r.serviceFrequency, r.servicePhase, r.accountStatus, r.serviceNotes]
+      .some((v) => v != null && String(v).toLowerCase().includes(t)));
+  }
+
   const paging = getPaging(req.query, { defaultPageSize: 50, maxPageSize: 500 });
   const total = rows.length;
   const pageRows = sliceArray(rows, paging);

@@ -231,8 +231,17 @@ async function serviceVsDriveTime(req, res) {
     res.set('X-Cache', 'HIT');
   }
   const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
-  const total = full.byRouteDay.length;
-  const byRouteDay = sliceArray(full.byRouteDay, paging);
+  const term = clean(req.query.q);
+  let list = full.byRouteDay;
+  if (term) {
+    const t = String(term).toLowerCase();
+    list = full.byRouteDay.filter((g) => Object.values(g).some((v) => {
+      if (v == null || typeof v === 'object') return Array.isArray(v) ? v.some((x) => String(x).toLowerCase().includes(t)) : false;
+      return String(v).toLowerCase().includes(t);
+    }));
+  }
+  const total = list.length;
+  const byRouteDay = sliceArray(list, paging);
   res.json(buildEnvelope(
     { kpis: full.kpis, series: full.series, byRoute: full.byRoute, byTechnician: full.byTechnician, byRouteDay },
     { meta: { source: 'inventory_db + bi_companydistances', from: from || null, to: to || null, routeCode: routeCode || null, granularity }, page: pageMeta(total, paging, byRouteDay.length) },

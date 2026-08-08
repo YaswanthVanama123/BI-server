@@ -227,7 +227,15 @@ async function checkins(req, res) {
   const statusData = Object.entries(counts).map(([name, value]) => ({ name, value }));
 
   const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
-  const slim = groups.map(({ stops, ...rest }) => rest);
+  let slim = groups.map(({ stops, ...rest }) => rest);
+  const term = clean(req.query.q);
+  if (term) {
+    const t = String(term).toLowerCase();
+    slim = slim.filter((g) => Object.values(g).some((v) => {
+      if (v == null || typeof v === 'object') return Array.isArray(v) ? v.some((x) => String(x).toLowerCase().includes(t)) : false;
+      return String(v).toLowerCase().includes(t);
+    }));
+  }
   const total = slim.length;
   const summary = sliceArray(slim, paging);
 

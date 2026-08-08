@@ -214,8 +214,17 @@ async function routeDriveTime(req, res) {
   const perRoute = [...prMap.values()].sort((a, b) => b.extra - a.extra);
 
   const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
-  const total = slim.length;
-  const summary = sliceArray(slim, paging);
+  const term = clean(req.query.q);
+  let list = slim;
+  if (term) {
+    const t = String(term).toLowerCase();
+    list = slim.filter((g) => Object.values(g).some((v) => {
+      if (v == null || typeof v === 'object') return Array.isArray(v) ? v.some((x) => String(x).toLowerCase().includes(t)) : false;
+      return String(v).toLowerCase().includes(t);
+    }));
+  }
+  const total = list.length;
+  const summary = sliceArray(list, paging);
   res.set('X-Cache', 'MISS');
   res.json(buildEnvelope(
     { kpis, perRoute, summary },
