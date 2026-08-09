@@ -2,10 +2,9 @@ name: Deploy to DigitalOcean
 
 # Auto-deploys the BI API to the DigitalOcean droplet on every push to main.
 # Flow: verify (npm ci + syntax check) -> SSH into the droplet -> pull main,
-# install prod deps, refresh Playwright chromium, reload under PM2, health-check.
 
 on:
-  push:
+  push: 
     branches: [main]
   workflow_dispatch: {}
 
