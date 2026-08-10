@@ -82,18 +82,29 @@ async function tenantId() {
   return t ? t._id : null;
 }
 
-async function pairMapFor(tid, names) {
-  const map = new Map();
-  if (!tid) return map;
+async function pairMapFor(tid, names, ids) {
+  const byName = new Map();
+  const byId = new Map();
+  if (!tid) return { byName, byId };
+  const or = [];
+  if (Array.isArray(names) && names.length) or.push({ fromCompany: { $in: names }, toCompany: { $in: names } });
+  if (Array.isArray(ids) && ids.length) or.push({ fromCustomerId: { $in: ids }, toCustomerId: { $in: ids } });
   const q = { tenantId: tid, drivingMinutes: { $ne: null } };
-  if (Array.isArray(names) && names.length) { q.fromCompany = { $in: names }; q.toCompany = { $in: names }; }
-  const pairs = await CompanyDistance.find(q, { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 }).lean();
+  if (or.length) q.$or = or;
+  const pairs = await CompanyDistance.find(q, { fromCompany: 1, toCompany: 1, fromCustomerId: 1, toCustomerId: 1, drivingMinutes: 1, distanceMiles: 1 }).lean();
   for (const p of pairs) {
     const a = normName(p.fromCompany); const b = normName(p.toCompany);
-    if (!map.has(`${a}||${b}`)) map.set(`${a}||${b}`, p);
-    if (!map.has(`${b}||${a}`)) map.set(`${b}||${a}`, p);
+    if (a && b) {
+      if (!byName.has(`${a}||${b}`)) byName.set(`${a}||${b}`, p);
+      if (!byName.has(`${b}||${a}`)) byName.set(`${b}||${a}`, p);
+    }
+    const fa = p.fromCustomerId; const fb = p.toCustomerId;
+    if (fa && fb) {
+      if (!byId.has(`${fa}||${fb}`)) byId.set(`${fa}||${fb}`, p);
+      if (!byId.has(`${fb}||${fa}`)) byId.set(`${fb}||${fa}`, p);
+    }
   }
-  return map;
+  return { byName, byId };
 }
 
 async function buildRows(from, to) {
@@ -140,7 +151,8 @@ async function buildRows(from, to) {
   });
 
   const names = [...new Set(stops.map((s) => s.customerName).filter(Boolean))];
-  const pairMap = await pairMapFor(tid, names);
+  const ids = [...new Set(stops.map((s) => s.cid).filter(Boolean))];
+  const pairMap = await pairMapFor(tid, names, ids);
 
   const byRouteDay = new Map();
   for (const s of stops) { const k = `${s.rc}||${s.dk}`; if (!byRouteDay.has(k)) byRouteDay.set(k, []); byRouteDay.get(k).push(s); }
@@ -148,11 +160,23 @@ async function buildRows(from, to) {
     arr.sort((a, b) => (a.arrMin ?? a.depMin ?? 1e9) - (b.arrMin ?? b.depMin ?? 1e9));
     for (let i = 0; i < arr.length; i++) {
       arr[i].seq = i + 1;
-      if (i > 0) {
+      if (i === 0) {
+        arr[i].travelMinutes = 0;
+        arr[i].travelMiles = 0;
+      } else {
         const prev = arr[i - 1];
-        const pair = pairMap.get(`${normName(prev.customerName)}||${normName(arr[i].customerName)}`);
-        arr[i].travelMinutes = pair && pair.drivingMinutes != null ? pair.drivingMinutes : null;
-        arr[i].travelMiles = pair && pair.distanceMiles != null ? pair.distanceMiles : null;
+        const cur = arr[i];
+        const sameCustomer = (cur.cid && prev.cid && cur.cid === prev.cid)
+          || (normName(prev.customerName) && normName(prev.customerName) === normName(cur.customerName));
+        if (sameCustomer) {
+          cur.travelMinutes = 0;
+          cur.travelMiles = 0;
+        } else {
+          const pair = (prev.cid && cur.cid && pairMap.byId.get(`${prev.cid}||${cur.cid}`))
+            || pairMap.byName.get(`${normName(prev.customerName)}||${normName(cur.customerName)}`);
+          cur.travelMinutes = pair && pair.drivingMinutes != null ? pair.drivingMinutes : null;
+          cur.travelMiles = pair && pair.distanceMiles != null ? pair.distanceMiles : null;
+        }
       }
     }
   }
