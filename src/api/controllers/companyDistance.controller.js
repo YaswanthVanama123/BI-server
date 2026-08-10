@@ -35,11 +35,12 @@ async function kpiCounts(tenantId) {
   const key = String(tenantId);
   const cached = kpiCache.get(key);
   if (cached) return cached;
-  const [total, pending] = await Promise.all([
+  const [total, pending, failed] = await Promise.all([
     CompanyDistance.countDocuments({ tenantId }),
     CompanyDistance.countDocuments({ tenantId, drivingMinutes: null }),
+    CompanyDistance.countDocuments({ tenantId, drivingMinutes: null, status: { $in: ['mapbox_failed', 'missing_coords'] } }),
   ]);
-  const kpi = { total, pending, synced: total - pending };
+  const kpi = { total, pending, synced: total - pending, failed };
   kpiCache.set(key, kpi);
   return kpi;
 }
@@ -131,8 +132,22 @@ async function sync(req, res) {
   res.json(buildEnvelope(result, { meta: { ...kpi, source: 'mapbox' } }));
 }
 
-async function syncStatus(req, res) {
+async function retryFailed(req, res) {
   const tenant = await ensureTenant(req);
+  const r = await CompanyDistance.updateMany(
+    { tenantId: tenant._id, drivingMinutes: null, status: { $in: ['mapbox_failed', 'missing_coords'] } },
+    { $set: { status: 'pending' } },
+  );
+  const requeued = r.modifiedCount != null ? r.modifiedCount : (r.nModified || 0);
+  kpiCache.clear();
+  optionsCache.clear();
+  listCache.clear();
+  const result = startSync(tenant, { batch: 500 });
+  const kpi = await kpiCounts(tenant._id);
+  res.json(buildEnvelope({ ...result, requeued }, { meta: { ...kpi, source: 'mapbox' } }));
+}
+
+async function syncStatus(req, res) {  const tenant = await ensureTenant(req);
   const job = snapshot(tenant);
   if (job && job.running) { kpiCache.clear(); listCache.clear(); }
   const kpi = await kpiCounts(tenant._id);
@@ -151,4 +166,4 @@ function startWarmer() {
   setInterval(() => { warm(); }, 240000);
 }
 
-module.exports = { list, options, sync, syncStatus, warm, startWarmer };
+module.exports = { list, options, sync, retryFailed, syncStatus, warm, startWarmer };
