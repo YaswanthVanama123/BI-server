@@ -38,12 +38,15 @@ function startSync(tenant, { batch = 500 } = {}) {
       if (useMapDistance) {
         disc = await discoverFromMapDistance(tenant);
 
-        try { await discover(tenant, { registerPairs: false }); } catch (e) { log.error(`route-leg build skipped: ${e.message}`); }
+        try {
+          const routeDisc = await discover(tenant, { registerPairs: true });
+          job.pairs = (disc.pairs || 0) + (routeDisc.pairs || 0);
+        } catch (e) { log.error(`route-leg build skipped: ${e.message}`); }
       } else {
         disc = await discover(tenant, {});
       }
       job.records = disc.records || 0;
-      job.pairs = disc.pairs || 0;
+      if (!job.pairs) job.pairs = disc.pairs || 0;
       job.phase = 'syncing';
       let prev = Infinity;
       for (;;) {

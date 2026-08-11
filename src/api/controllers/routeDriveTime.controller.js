@@ -9,6 +9,7 @@ const { CompanyDistance, Tenant } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
 const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 
 function toMinutes(s) {
@@ -64,7 +65,7 @@ async function getAllStops(from, to) {
   const pre = datePrefilter(from, to);
   if (pre) and.push(pre);
   const docs = (await db.collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, invoiceNumber: 1, 'customer.name': 1, 'customer.link': 1, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1 } })
     .batchSize(5000)
     .limit(50000).toArray()).filter((d) => inFilterRange(d, from, to));
 
@@ -79,6 +80,7 @@ async function getAllStops(from, to) {
       routeCode: rc, dateKey: dk,
       invoiceNumber: d.invoiceNumber,
       customer: (d.customer && d.customer.name) || '',
+      cid: customerIdFromLink(d.customer && d.customer.link) || null,
       arrival: clean(d.arrivalTime) || null,
       departure: clean(d.departureTime) || null,
       arrMin: toMinutes(d.arrivalTime),
@@ -94,20 +96,32 @@ async function getStops(from, to, routeCode) {
   return routeCode ? all.filter((s) => s.routeCode === routeCode) : all;
 }
 
-async function getPairByName(tenantId, names) {
+async function getPairMaps(tenantId, names, ids) {
   const byName = new Map();
-  if (!tenantId) return byName;
+  const byId = new Map();
+  if (!tenantId) return { byName, byId };
+  const or = [];
+  if (Array.isArray(names) && names.length) or.push({ fromCompany: { $in: names }, toCompany: { $in: names } });
+  if (Array.isArray(ids) && ids.length) or.push({ fromCustomerId: { $in: ids }, toCustomerId: { $in: ids } });
   const q = { tenantId, drivingMinutes: { $ne: null } };
-  if (Array.isArray(names) && names.length) { q.fromCompany = { $in: names }; q.toCompany = { $in: names }; }
+  if (or.length) q.$or = or;
   const pairs = await CompanyDistance.find(
     q,
-    { fromCompany: 1, toCompany: 1, drivingMinutes: 1, distanceMiles: 1 },
+    { fromCompany: 1, toCompany: 1, fromCustomerId: 1, toCustomerId: 1, drivingMinutes: 1, distanceMiles: 1 },
   ).lean();
   for (const p of pairs) {
-    const nk = `${normName(p.fromCompany)}||${normName(p.toCompany)}`;
-    if (!byName.has(nk)) byName.set(nk, p);
+    const a = normName(p.fromCompany); const b = normName(p.toCompany);
+    if (a && b) {
+      if (!byName.has(`${a}||${b}`)) byName.set(`${a}||${b}`, p);
+      if (!byName.has(`${b}||${a}`)) byName.set(`${b}||${a}`, p);
+    }
+    const fa = p.fromCustomerId; const fb = p.toCustomerId;
+    if (fa && fb) {
+      if (!byId.has(`${fa}||${fb}`)) byId.set(`${fa}||${fb}`, p);
+      if (!byId.has(`${fb}||${fa}`)) byId.set(`${fb}||${fa}`, p);
+    }
   }
-  return byName;
+  return { byName, byId };
 }
 
 async function options(req, res) {
@@ -133,7 +147,7 @@ async function options(req, res) {
   res.json(payload);
 }
 
-function buildPayload(stops, byName, from, to, routeCode) {
+function buildPayload(stops, maps, from, to, routeCode) {
   const groups = new Map();
   for (const s of stops) {
     const k = `${s.routeCode}||${s.dateKey}`;
@@ -147,13 +161,22 @@ function buildPayload(stops, byName, from, to, routeCode) {
     for (let i = 0; i < g.stops.length - 1; i++) {
       const cur = g.stops[i]; const nxt = g.stops[i + 1];
       const observed = (cur.depMin != null && nxt.arrMin != null) ? nxt.arrMin - cur.depMin : null;
-      const pair = byName.get(`${normName(cur.customer)}||${normName(nxt.customer)}`);
-      const driving = pair && pair.drivingMinutes != null ? pair.drivingMinutes : null;
-      const distance = pair && pair.distanceMiles != null ? pair.distanceMiles : null;
+      const sameCustomer = (cur.cid && nxt.cid && cur.cid === nxt.cid)
+        || (normName(cur.customer) && normName(cur.customer) === normName(nxt.customer));
+      let driving = null; let distance = null;
+      if (sameCustomer) {
+        driving = 0; distance = 0;
+      } else {
+        const pair = (cur.cid && nxt.cid && maps.byId.get(`${cur.cid}||${nxt.cid}`))
+          || maps.byName.get(`${normName(cur.customer)}||${normName(nxt.customer)}`);
+        driving = pair && pair.drivingMinutes != null ? pair.drivingMinutes : null;
+        distance = pair && pair.distanceMiles != null ? pair.distanceMiles : null;
+      }
       const extra = (observed != null && driving != null) ? round(observed - driving, 1) : null;
       let status = 'ok';
       if (cur.depMin == null || nxt.arrMin == null) status = 'missing_times';
       else if (observed < 0) status = 'negative_gap';
+      else if (sameCustomer) status = 'same_location';
       else if (driving == null) status = 'pending_sync';
       legs.push({
         fromInvoiceNumber: cur.invoiceNumber, toInvoiceNumber: nxt.invoiceNumber,
@@ -187,8 +210,9 @@ async function getFullData(req, from, to, routeCode) {
   const tenant = await ensureTenant(req);
   const stops = await getStops(from, to, routeCode);
   const names = [...new Set(stops.map((s) => s.customer).filter(Boolean))];
-  const byName = await getPairByName(tenant._id, names);
-  const data = buildPayload(stops, byName, from, to, routeCode).data;
+  const ids = [...new Set(stops.map((s) => s.cid).filter(Boolean))];
+  const maps = await getPairMaps(tenant._id, names, ids);
+  const data = buildPayload(stops, maps, from, to, routeCode).data;
   payloadCache.set(key, data);
   return data;
 }
@@ -277,8 +301,9 @@ async function warm() {
       try {
         const stops = await getStops(r.from, r.to, undefined);
         const names = [...new Set(stops.map((s) => s.customer).filter(Boolean))];
-        const byName = await getPairByName(t._id, names);
-        const data = buildPayload(stops, byName, r.from, r.to, undefined).data;
+        const ids = [...new Set(stops.map((s) => s.cid).filter(Boolean))];
+        const maps = await getPairMaps(t._id, names, ids);
+        const data = buildPayload(stops, maps, r.from, r.to, undefined).data;
         payloadCache.set(`rdtfull|${r.from}|${r.to}|`, data);
       } catch (e) {}
     }
