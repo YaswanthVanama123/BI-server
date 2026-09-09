@@ -21,7 +21,26 @@ const YEARLY = {
   quarterly: 4, 'every quarter': 4, 'bi-annual': 2, 'bi annual': 2, 'semi-annual': 2, 'semi annual': 2, 'twice a year': 2,
   annual: 1, annually: 1, yearly: 1, 'once a year': 1, 'one time': 1, 'one-time': 1,
 };
-const perYear = (freq) => { const f = String(freq || '').toLowerCase().replace(/\s+/g, ' ').trim(); return YEARLY[f] != null ? YEARLY[f] : 0; };
+const YEARLY_PATTERNS = [
+  [/^monthly ?week ?\d+$/, () => 12],
+  [/^every ?(\d+) ?weeks?$/, (m) => round(52 / Number(m[1]), 2)],
+  [/^every ?(\d+) ?months?$/, (m) => round(12 / Number(m[1]), 2)],
+];
+const perYear = (freq) => {
+  const f = String(freq || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (YEARLY[f] != null) return YEARLY[f];
+  for (const [rx, fn] of YEARLY_PATTERNS) {
+    const m = rx.exec(f);
+    if (m && (m[1] == null || Number(m[1]) > 0)) return fn(m);
+  }
+  return 0;
+};
+const ONE_TIME = 'One Time';
+const ONE_TIME_ALIASES = new Set(['one time', 'one-time', 'onetime']);
+const itemFrequencyLabel = (freq) => {
+  const f = String(freq == null ? '' : freq).toLowerCase().replace(/\s+/g, ' ').trim();
+  return (!f || f.startsWith('choose') || ONE_TIME_ALIASES.has(f)) ? ONE_TIME : clean(freq);
+};
 const categoryOf = (item) => { const s = clean(item) || ''; return s.includes(':') ? s.split(':')[0].trim() : (s || 'Uncategorized'); };
 const labelOf = (item) => { const s = clean(item) || ''; const i = s.lastIndexOf(':'); return ((i >= 0 ? s.slice(i + 1) : s).trim()) || 'Uncategorized'; };
 const primaryRoute = (routes) => { for (const r of routes || []) { const rc = clean(r && (r.Route || r.route)); if (rc) return String(rc).trim().toUpperCase(); } return null; };
@@ -368,8 +387,8 @@ async function drillData(from, to, { routeCode, customerId, category, frequency 
       if (freqFilter) {
         const sk = `${clean(li.name) || ''}||${Number(li.rate || 0)}`;
         let lf = sm && sm.has(sk) ? sm.get(sk) : frequencyFor(li, pricing);
-        lf = lf || null;
-        if (lf !== (freqFilter === NONE ? null : freqFilter)) continue;
+        lf = itemFrequencyLabel(lf);
+        if (lf !== (freqFilter === NONE ? ONE_TIME : freqFilter)) continue;
       }
       const a = Number(li.amount || 0);
       amt += a; matched += 1;
@@ -605,8 +624,8 @@ async function itemFrequency(req, res) {
       itemKeys.add(key);
       const sk = `${clean(li.name) || ''}||${Number(li.rate || 0)}`;
       let freq = sm && sm.has(sk) ? sm.get(sk) : frequencyFor(li, pricing);
-      freq = freq || null;
-      const gkey = `${key}||${freq || ''}`;
+      freq = itemFrequencyLabel(freq);
+      const gkey = `${key}||${freq}`;
       let r = map.get(gkey);
       if (!r) { r = { item: labelOf(li.name), category: categoryOf(li.name), frequency: freq, occurrences: 0, qty: 0, invoiced: 0, invoices: new Set(), customers: new Set() }; map.set(gkey, r); }
       r.occurrences += 1;

@@ -27,26 +27,24 @@ function startSync(tenant, { batch = 500 } = {}) {
   const job = {
     running: true, phase: 'discovering', source: useMapDistance ? 'mapdistance' : 'invoices',
     startedAt: new Date().toISOString(), finishedAt: null,
-    records: 0, pairs: 0, processed: 0, synced: 0, failed: 0, geocoded: 0, remaining: null, error: null,
+    records: 0, pairs: 0, processed: 0, synced: 0, failed: 0, geocoded: 0, remaining: null, error: null, discoverError: null,
   };
   jobs.set(k, job);
 
   (async () => {
     const runId = await recordStart('company-distances', 'Distances / driving-time Mapbox sync');
     try {
-      let disc;
-      if (useMapDistance) {
-        disc = await discoverFromMapDistance(tenant);
-
-        try {
-          const routeDisc = await discover(tenant, { registerPairs: true });
-          job.pairs = (disc.pairs || 0) + (routeDisc.pairs || 0);
-        } catch (e) { log.error(`route-leg build skipped: ${e.message}`); }
-      } else {
-        disc = await discover(tenant, {});
+      let routePairs = 0;
+      try {
+        const routeDisc = await discover(tenant, { registerPairs: true });
+        routePairs = routeDisc.pairs || 0;
+      } catch (e) {
+        job.discoverError = e.message;
+        log.error(`invoice-leg pair discovery failed: ${e.message}`);
       }
+      const disc = useMapDistance ? await discoverFromMapDistance(tenant) : {};
       job.records = disc.records || 0;
-      if (!job.pairs) job.pairs = disc.pairs || 0;
+      job.pairs = routePairs + (disc.pairs || 0);
       job.phase = 'syncing';
       let prev = Infinity;
       for (;;) {
@@ -65,7 +63,7 @@ function startSync(tenant, { batch = 500 } = {}) {
       log.info(`sync job ${job.phase}: ${job.synced} synced, ${job.failed} failed, ${job.remaining} pending`);
       await recordFinish(runId, {
         status: job.phase === 'error' ? 'error' : 'done',
-        summary: { source: job.source, pairs: job.pairs, synced: job.synced, failed: job.failed, geocoded: job.geocoded, remaining: job.remaining },
+        summary: { source: job.source, pairs: job.pairs, synced: job.synced, failed: job.failed, geocoded: job.geocoded, remaining: job.remaining, discoverError: job.discoverError },
         error: job.error,
       });
     }

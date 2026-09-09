@@ -225,16 +225,16 @@ async function routeDriveTime(req, res) {
   const data = await getFullData(req, from, to, routeCode);
   const slim = data.map(({ legs, ...rest }) => rest);
 
-  let legs = 0; let driving = 0; let observed = 0; let extra = 0; let distance = 0;
+  let legs = 0; let driving = 0; let observed = 0; let extra = 0; let distance = 0; let syncedLegs = 0;
   const prMap = new Map();
   for (const g of slim) {
     legs += g.legCount || 0; driving += g.drivingMinutes || 0; observed += g.observedGapMinutes || 0;
-    extra += g.extraTimeMinutes || 0; distance += g.distanceMiles || 0;
+    extra += g.extraTimeMinutes || 0; distance += g.distanceMiles || 0; syncedLegs += g.syncedLegs || 0;
     const a = prMap.get(g.routeCode) || { routeCode: g.routeCode, driving: 0, extra: 0, distance: 0, legs: 0 };
     a.driving += g.drivingMinutes || 0; a.extra += g.extraTimeMinutes || 0; a.distance += g.distanceMiles || 0; a.legs += g.legCount || 0;
     prMap.set(g.routeCode, a);
   }
-  const kpis = { legs, driving, observed, extra, distance, avgExtra: legs ? round(extra / legs, 1) : 0 };
+  const kpis = { legs, driving, observed, extra, distance, avgExtra: legs ? round(extra / legs, 1) : 0, syncedLegs, unsyncedLegs: legs - syncedLegs };
   const perRoute = [...prMap.values()].sort((a, b) => b.extra - a.extra);
 
   const paging = getPaging(req.query, { defaultPageSize: 25, maxPageSize: 200 });
