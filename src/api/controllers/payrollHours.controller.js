@@ -3,6 +3,7 @@ const { models } = require('../../models');
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs, minutesBetween } = require('../lib/stopTimes');
 const env = require('../../config/env');
 
 const { CompanyDistance, Tenant } = models;
@@ -13,14 +14,6 @@ const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'C
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 const LUNCH_MIN = 60;
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 function dateBound(dk, days) { const d = new Date(`${dk}T00:00:00.000Z`); d.setUTCDate(d.getUTCDate() + days); return d; }
 function datePrefilter(from, to) {
   if (!from && !to) return null;
@@ -69,13 +62,16 @@ async function payrollHours(req, res) {
     .batchSize(5000)
     .limit(50000).toArray()).filter((inv) => inFilterRange(inv, from, to));
 
-  const stops = invoices.map((inv) => ({
-    tech: clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)',
-    dk: filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate),
-    arr: toMinutes(inv.arrivalTime),
-    dep: toMinutes(inv.departureTime),
-    customerName: (inv.customer && inv.customer.name) || '',
-  }));
+  const stops = invoices.map((inv) => {
+    const dk = filterDayKey(inv) || dayKey(inv.dateCompleted || inv.invoiceDate);
+    return {
+      tech: clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)',
+      dk,
+      arr: parseTs(inv.arrivalTime, dk),
+      dep: parseTs(inv.departureTime, dk),
+      customerName: (inv.customer && inv.customer.name) || '',
+    };
+  });
 
   const tid = await tenantId();
   const names = [...new Set(stops.map((s) => s.customerName).filter(Boolean))];
@@ -97,14 +93,15 @@ async function payrollHours(req, res) {
   };
 
   for (const grp of byTechDay.values()) {
-    const arr = grp.list.slice().sort((a, b) => (a.arr != null ? a.arr : a.dep != null ? a.dep : 1e9) - (b.arr != null ? b.arr : b.dep != null ? b.dep : 1e9));
+    const arr = grp.list.slice().sort((a, b) => (a.arr ?? a.dep ?? Infinity) - (b.arr ?? b.dep ?? Infinity));
     const t = getT(grp.tech);
     t.days += 1;
     t.stops += arr.length;
     t.lunchMin += LUNCH_MIN;
     for (let i = 0; i < arr.length; i++) {
       const s = arr[i];
-      if (s.arr != null && s.dep != null && s.dep >= s.arr) t.serviceMin += (s.dep - s.arr);
+      const svc = minutesBetween(s.arr, s.dep);
+      if (svc != null) t.serviceMin += svc;
       if (i > 0) {
         const prev = arr[i - 1];
         const pair = pairMap.get(`${normName(prev.customerName)}||${normName(s.customerName)}`);

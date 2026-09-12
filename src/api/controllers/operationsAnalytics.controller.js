@@ -2,20 +2,13 @@
 const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs, minutesBetween } = require('../lib/stopTimes');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 const DOW = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
 function dateBound(dk, days) {
@@ -77,13 +70,13 @@ async function getAllStops(from, to) {
     if (from && dk < from) continue;
     if (to && dk > to) continue;
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    const arr = toMinutes(inv.arrivalTime);
-    const dep = toMinutes(inv.departureTime);
+    const arr = parseTs(inv.arrivalTime, dk);
+    const dep = parseTs(inv.departureTime, dk);
     stops.push({
       technician: rc,
       routeCode: rc, dateKey: dk,
       arr, dep,
-      service: (arr != null && dep != null && dep >= arr) ? dep - arr : null,
+      service: minutesBetween(arr, dep),
     });
   }
   stopsCache.set(key, stops);
@@ -108,7 +101,7 @@ function perTechDay(stops) {
     const deps = o.stops.map((s) => s.dep).filter((x) => x != null);
     const firstArr = arrs.length ? Math.min(...arrs) : null;
     const lastDep = deps.length ? Math.max(...deps) : null;
-    const span = (firstArr != null && lastDep != null && lastDep >= firstArr) ? lastDep - firstArr : null;
+    const span = minutesBetween(firstArr, lastDep);
     out.push({ technician: o.technician, dateKey: o.dateKey, stopCount: o.stops.length, service: o.service, span: span || 0 });
   }
   return out;

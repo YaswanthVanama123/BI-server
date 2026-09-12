@@ -3,6 +3,7 @@ const { models } = require('../../models');
 const { getSourceDb, getEnviromasterDb } = require('../../config/database');
 const { getLeg, geocode } = require('./mapboxService');
 const { inFilterRange } = require('../../api/lib/checkoutDate');
+const { parseTs, signedMinutesBetween } = require('../../api/lib/stopTimes');
 const logger = require('../../utils/logger');
 
 const { RouteDriveLeg, CompanyDistance } = models;
@@ -11,14 +12,6 @@ const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'C
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 function customerIdFromLink(link) { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; }
 function validCoord(c) { return Array.isArray(c) && c.length === 2 && Number.isFinite(c[0]) && Number.isFinite(c[1]) && !(c[0] === 0 && c[1] === 0); }
 function coordOf(c) {
@@ -58,7 +51,7 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
       invoiceNumber: inv.invoiceNumber, dateKey: dk,
       routeCode: clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)',
       customerId: cid, customer: (inv.customer && inv.customer.name) || '',
-      arrMin: toMinutes(inv.arrivalTime), depMin: toMinutes(inv.departureTime),
+      arrTs: parseTs(inv.arrivalTime, dk), depTs: parseTs(inv.departureTime, dk),
       arrival: clean(inv.arrivalTime), departure: clean(inv.departureTime),
       coord: cust ? coordOf(cust) : null,
     });
@@ -72,12 +65,13 @@ async function discover(tenant, { from, to, registerPairs = true } = {}) {
   const pairOps = [];
   const pairSeen = new Set();
   for (const arr of groups.values()) {
-    arr.sort((a, b) => (a.arrMin ?? a.depMin ?? 1e9) - (b.arrMin ?? b.depMin ?? 1e9));
+    arr.sort((a, b) => (a.arrTs ?? a.depTs ?? Infinity) - (b.arrTs ?? b.depTs ?? Infinity));
     for (let i = 0; i < arr.length - 1; i++) {
       const cur = arr[i]; const nxt = arr[i + 1];
-      let status = 'ok'; let observedGap = null;
-      if (cur.depMin == null || nxt.arrMin == null) status = 'missing_times';
-      else { observedGap = nxt.arrMin - cur.depMin; if (observedGap < 0) status = 'negative_gap'; }
+      let status = 'ok';
+      const observedGap = signedMinutesBetween(cur.depTs, nxt.arrTs);
+      if (observedGap == null) status = 'missing_times';
+      else if (observedGap < 0) status = 'negative_gap';
       legOps.push({
         updateOne: {
           filter: { tenantId: tenant._id, dateKey: cur.dateKey, routeCode: cur.routeCode, fromInvoiceNumber: cur.invoiceNumber, toInvoiceNumber: nxt.invoiceNumber },

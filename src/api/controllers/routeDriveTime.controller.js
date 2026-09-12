@@ -4,6 +4,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs, signedMinutesBetween } = require('../lib/stopTimes');
 
 const { CompanyDistance, Tenant } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
@@ -12,14 +13,6 @@ const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' '
 const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
 function dateBound(dk, days) {
@@ -83,8 +76,8 @@ async function getAllStops(from, to) {
       cid: customerIdFromLink(d.customer && d.customer.link) || null,
       arrival: clean(d.arrivalTime) || null,
       departure: clean(d.departureTime) || null,
-      arrMin: toMinutes(d.arrivalTime),
-      depMin: toMinutes(d.departureTime),
+      arrTs: parseTs(d.arrivalTime, dk),
+      depTs: parseTs(d.departureTime, dk),
     });
   }
   stopsCache.set(key, stops);
@@ -156,11 +149,11 @@ function buildPayload(stops, maps, from, to, routeCode) {
   }
 
   const data = [...groups.values()].map((g) => {
-    g.stops.sort((a, b) => (a.arrMin ?? a.depMin ?? 1e9) - (b.arrMin ?? b.depMin ?? 1e9));
+    g.stops.sort((a, b) => (a.arrTs ?? a.depTs ?? Infinity) - (b.arrTs ?? b.depTs ?? Infinity));
     const legs = [];
     for (let i = 0; i < g.stops.length - 1; i++) {
       const cur = g.stops[i]; const nxt = g.stops[i + 1];
-      const observed = (cur.depMin != null && nxt.arrMin != null) ? nxt.arrMin - cur.depMin : null;
+      const observed = signedMinutesBetween(cur.depTs, nxt.arrTs);
       const sameCustomer = (cur.cid && nxt.cid && cur.cid === nxt.cid)
         || (normName(cur.customer) && normName(cur.customer) === normName(nxt.customer));
       let driving = null; let distance = null;
@@ -174,7 +167,7 @@ function buildPayload(stops, maps, from, to, routeCode) {
       }
       const extra = (observed != null && driving != null) ? round(observed - driving, 1) : null;
       let status = 'ok';
-      if (cur.depMin == null || nxt.arrMin == null) status = 'missing_times';
+      if (cur.depTs == null || nxt.arrTs == null) status = 'missing_times';
       else if (observed < 0) status = 'negative_gap';
       else if (sameCustomer) status = 'same_location';
       else if (driving == null) status = 'pending_sync';

@@ -4,6 +4,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs } = require('../lib/stopTimes');
 const { frequencyFor } = require('../../services/pricingMatch');
 
 const { CustomerAccount, CompanyDistance, InvoiceFrequency, Tenant } = models;
@@ -19,14 +20,6 @@ function activityDateKey(ts) {
 const customerIdFromLink = (link) => { const m = String(link || '').match(/customerdetail\/([^/?#]+)/i); return m ? decodeURIComponent(m[1]) : null; };
 const categoryOf = (item) => { const s = clean(item) || ''; return s.includes(':') ? s.split(':')[0].trim() : (s || null); };
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 function dateBound(dk, days) { const d = new Date(`${dk}T00:00:00.000Z`); d.setUTCDate(d.getUTCDate() + days); return d; }
 function datePrefilter(from, to) {
   if (!from && !to) return null;
@@ -137,8 +130,8 @@ async function buildRows(from, to) {
     const cats = [...new Set((inv.lineItems || []).map((li) => categoryOf(li.name)).filter(Boolean))];
     return {
       cid, rc, dk,
-      arrMin: toMinutes(inv.arrivalTime),
-      depMin: toMinutes(inv.departureTime),
+      arrTs: parseTs(inv.arrivalTime, dk),
+      depTs: parseTs(inv.departureTime, dk),
       customerName: (inv.customer && inv.customer.name) || '',
       invoiceNumber: inv.invoiceNumber,
       arrivalTime: clean(inv.arrivalTime) || null,
@@ -157,7 +150,7 @@ async function buildRows(from, to) {
   const byRouteDay = new Map();
   for (const s of stops) { const k = `${s.rc}||${s.dk}`; if (!byRouteDay.has(k)) byRouteDay.set(k, []); byRouteDay.get(k).push(s); }
   for (const arr of byRouteDay.values()) {
-    arr.sort((a, b) => (a.arrMin ?? a.depMin ?? 1e9) - (b.arrMin ?? b.depMin ?? 1e9));
+    arr.sort((a, b) => (a.arrTs ?? a.depTs ?? Infinity) - (b.arrTs ?? b.depTs ?? Infinity));
     for (let i = 0; i < arr.length; i++) {
       arr[i].seq = i + 1;
       if (i === 0) {

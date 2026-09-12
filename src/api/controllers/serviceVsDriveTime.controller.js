@@ -4,6 +4,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs, minutesBetween } = require('../lib/stopTimes');
 
 const { CompanyDistance, Tenant } = models;
 
@@ -12,14 +13,6 @@ const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; }
 const normName = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
 const dayKey = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
 function dateBound(dk, days) {
@@ -87,15 +80,15 @@ async function getAllStops(from, to) {
     if (from && dk < from) continue;
     if (to && dk > to) continue;
     const rc = clean(inv.assignedTo) ? String(inv.assignedTo).trim().toUpperCase() : '(unassigned)';
-    const arr = toMinutes(inv.arrivalTime);
-    const dep = toMinutes(inv.departureTime);
+    const arr = parseTs(inv.arrivalTime, dk);
+    const dep = parseTs(inv.departureTime, dk);
     stops.push({
       technician: rc,
       routeCode: rc,
       dateKey: dk,
       customer: (inv.customer && inv.customer.name) || '',
       arr, dep,
-      service: (arr != null && dep != null && dep >= arr) ? dep - arr : null,
+      service: minutesBetween(arr, dep),
     });
   }
   stopsCache.set(key, stops);
@@ -155,12 +148,11 @@ function buildPayload(stops, pairMap, from, to, routeCode, granularity) {
   const byTechDay = new Map();
   for (const s of stops) { const k = `${s.technician}||${s.dateKey}`; if (!byTechDay.has(k)) byTechDay.set(k, []); byTechDay.get(k).push(s); }
   for (const arr of byTechDay.values()) {
-    arr.sort((a, b) => (a.arr ?? a.dep ?? 1e9) - (b.arr ?? b.dep ?? 1e9));
+    arr.sort((a, b) => (a.arr ?? a.dep ?? Infinity) - (b.arr ?? b.dep ?? Infinity));
     for (let i = 0; i < arr.length - 1; i++) {
       const cur = arr[i]; const nxt = arr[i + 1];
-      if (cur.dep == null || nxt.arr == null) continue;
-      const gap = nxt.arr - cur.dep;
-      if (gap < 0) continue;
+      const gap = minutesBetween(cur.dep, nxt.arr);
+      if (gap == null) continue;
       const pair = pairMap.get(`${normName(cur.customer)}||${normName(nxt.customer)}`);
       const drive = pair && pair.drivingMinutes != null ? pair.drivingMinutes : null;
       legs += 1;

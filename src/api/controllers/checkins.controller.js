@@ -3,6 +3,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getPaging, pageMeta, sliceArray } = require('../lib/pagination');
 const { getSourceDb } = require('../../config/database');
 const { inFilterRange, filterDayKey } = require('../lib/checkoutDate');
+const { parseTs } = require('../lib/stopTimes');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const CLOSED = { $or: [{ invoiceType: 'closed' }, { status: { $in: ['Closed', 'Completed'] } }] };
@@ -32,31 +33,6 @@ function cacheSet(key, payload) {
   if (cache.size > 200) cache.delete(cache.keys().next().value);
 }
 
-function toMinutes(s) {
-  const m = String(s || '').trim().toUpperCase().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/);
-  if (!m) return null;
-  let h = +m[1]; const mi = +m[2];
-  if (m[3] === 'PM' && h < 12) h += 12;
-  if (m[3] === 'AM' && h === 12) h = 0;
-  return h * 60 + mi;
-}
-function parseTs(str, dk) {
-  const s = clean(str);
-  if (!s) return null;
-  if (/\d{1,4}[/-]\d{1,2}[/-]\d{1,4}/.test(s)) {
-    const d = new Date(s);
-    if (!Number.isNaN(d.getTime())) {
-      if (!dk) return d.getTime();
-      const base = new Date(`${dk}T00:00:00`).getTime();
-      const diffDays = (d.getTime() - base) / 86400000;
-      if (diffDays >= -0.5 && diffDays <= 1.5) return d.getTime();
-      return null;
-    }
-  }
-  const mins = toMinutes(s);
-  if (mins == null || !dk) return null;
-  return new Date(`${dk}T00:00:00`).getTime() + mins * 60000;
-}
 function elapsedToMinutes(s) {
   if (!s) return null;
   const t = String(s).trim();
@@ -161,7 +137,7 @@ async function loadCheckins(from, to, route) {
     const lastStop = withDep.length ? withDep.reduce((a, b) => (a._dep >= b._dep ? a : b)) : null;
     const spanMinutes = (firstStop && lastStop && lastStop._dep >= firstStop._arr) ? Math.round((lastStop._dep - firstStop._arr) / 60000) : null;
     const totalServiceMinutes = g.stops.reduce((t, s) => t + (s.serviceMinutes || 0), 0);
-    const totalGapMinutes = g.stops.reduce((t, s) => t + (s.gapToNextMinutes || 0), 0);
+    const totalGapMinutes = Math.max(0, (spanMinutes || 0) - totalServiceMinutes);
     const flaggedStops = g.stops.filter((s) => s.elapsedStatus !== 'ok').length;
     const invoiceNumbers = g.stops.map((s) => s.invoiceNumber).filter(Boolean);
     return {
@@ -207,12 +183,14 @@ async function checkins(req, res) {
   for (const g of groups) {
     routesSet.add(g.route); daysSet.add(g.date);
     totalStops += g.stopCount || 0; totalService += g.totalServiceMinutes || 0;
-    totalGap += g.totalGapMinutes || 0; totalSpan += g.spanMinutes || 0; flagged += g.flaggedStops || 0;
+    totalSpan += g.spanMinutes || 0; flagged += g.flaggedStops || 0;
     const a = perRouteMap.get(g.route) || { route: g.route, stops: 0, service: 0, gap: 0, span: 0 };
-    a.stops += g.stopCount || 0; a.service += g.totalServiceMinutes || 0; a.gap += g.totalGapMinutes || 0; a.span += g.spanMinutes || 0;
+    a.stops += g.stopCount || 0; a.service += g.totalServiceMinutes || 0; a.span += g.spanMinutes || 0;
     perRouteMap.set(g.route, a);
     for (const s of g.stops || []) counts[s.elapsedStatus] = (counts[s.elapsedStatus] || 0) + 1;
   }
+  for (const a of perRouteMap.values()) a.gap = Math.max(0, a.span - a.service);
+  totalGap = Math.max(0, totalSpan - totalService);
   const kpis = {
     routes: routesSet.size,
     days: daysSet.size,
