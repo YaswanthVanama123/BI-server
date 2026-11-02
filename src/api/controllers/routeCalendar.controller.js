@@ -3,6 +3,7 @@ const { buildEnvelope } = require('../lib/envelope');
 const { getSourceDb } = require('../../config/database');
 const { filterDayKey } = require('../lib/checkoutDate');
 const { parseTs, minutesBetween } = require('../lib/stopTimes');
+const { netCents, taxCents, dollars } = require('../lib/invoiceMoney');
 
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
 const round = (n, d = 1) => { const f = 10 ** d; return Math.round(n * f) / f; };
@@ -41,7 +42,7 @@ async function loadStops(from, to, routeCode) {
   const and = [CLOSED, { dateCompleted: { $gte: dateBound(from, -2), $lte: dateBound(to, 2) } }];
   if (routeCode) and.push({ assignedTo: new RegExp(`^\\s*${escapeRegex(routeCode)}\\s*$`, 'i') });
   const invoices = await getSourceDb().collection('routestarinvoices')
-    .find({ $and: and }, { projection: { _id: 0, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, total: 1 } })
+    .find({ $and: and }, { projection: { _id: 0, assignedTo: 1, dateCompleted: 1, invoiceDate: 1, arrivalTime: 1, departureTime: 1, subtotal: 1, tax: 1, total: 1 } })
     .batchSize(5000)
     .limit(50000)
     .toArray();
@@ -54,7 +55,7 @@ async function loadStops(from, to, routeCode) {
     if (routeCode && route !== routeCode) continue;
     const arr = parseTs(inv.arrivalTime, date);
     const dep = parseTs(inv.departureTime, date);
-    stops.push({ route, date, arr, dep, service: minutesBetween(arr, dep) || 0, revenue: Number(inv.total) || 0 });
+    stops.push({ route, date, arr, dep, service: minutesBetween(arr, dep) || 0, net: netCents(inv), tax: taxCents(inv) });
   }
   return stops;
 }
@@ -64,10 +65,11 @@ function summarizeDays(stops) {
   for (const s of stops) {
     const key = `${s.route}||${s.date}`;
     let g = routeDays.get(key);
-    if (!g) { g = { date: s.date, stops: 0, service: 0, revenue: 0, firstArr: null, lastDep: null }; routeDays.set(key, g); }
+    if (!g) { g = { date: s.date, stops: 0, service: 0, net: 0, tax: 0, firstArr: null, lastDep: null }; routeDays.set(key, g); }
     g.stops += 1;
     g.service += s.service;
-    g.revenue += s.revenue;
+    g.net += s.net;
+    g.tax += s.tax;
     if (s.arr != null && (g.firstArr == null || s.arr < g.firstArr)) g.firstArr = s.arr;
     if (s.dep != null && (g.lastDep == null || s.dep > g.lastDep)) g.lastDep = s.dep;
   }
@@ -75,19 +77,20 @@ function summarizeDays(stops) {
   const byDate = new Map();
   for (const g of routeDays.values()) {
     let d = byDate.get(g.date);
-    if (!d) { d = { date: g.date, routes: 0, stops: 0, service: 0, span: 0, revenue: 0 }; byDate.set(g.date, d); }
+    if (!d) { d = { date: g.date, routes: 0, stops: 0, service: 0, span: 0, net: 0, tax: 0 }; byDate.set(g.date, d); }
     d.routes += 1;
     d.stops += g.stops;
     d.service += g.service;
     d.span += minutesBetween(g.firstArr, g.lastDep) || 0;
-    d.revenue += g.revenue;
+    d.net += g.net;
+    d.tax += g.tax;
   }
   return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function buildCalendar(stops, from, to, routeCode) {
   const days = summarizeDays(stops);
-  const tot = days.reduce((t, d) => ({ stops: t.stops + d.stops, service: t.service + d.service, span: t.span + d.span, revenue: t.revenue + d.revenue }), { stops: 0, service: 0, span: 0, revenue: 0 });
+  const tot = days.reduce((t, d) => ({ stops: t.stops + d.stops, service: t.service + d.service, span: t.span + d.span, net: t.net + d.net, tax: t.tax + d.tax }), { stops: 0, service: 0, span: 0, net: 0, tax: 0 });
   const kpis = {
     days: days.length,
     routes: new Set(stops.map((s) => s.route)).size,
@@ -95,10 +98,12 @@ function buildCalendar(stops, from, to, routeCode) {
     serviceMinutes: round(tot.service),
     spanMinutes: round(tot.span),
     avgServiceMinutes: tot.stops ? round(tot.service / tot.stops) : 0,
-    revenue: round(tot.revenue, 2),
+    revenue: dollars(tot.net),
+    tax: dollars(tot.tax),
+    billed: dollars(tot.net + tot.tax),
     utilizationPct: tot.span ? round((tot.service / tot.span) * 100) : null,
     avgStopsPerDay: days.length ? round(tot.stops / days.length) : 0,
-    avgRevenuePerDay: days.length ? round(tot.revenue / days.length, 2) : 0,
+    avgRevenuePerDay: days.length ? round(dollars(tot.net) / days.length, 2) : 0,
   };
   const rows = days.map((d) => ({
     date: d.date,
@@ -107,10 +112,12 @@ function buildCalendar(stops, from, to, routeCode) {
     serviceMinutes: round(d.service),
     spanMinutes: round(d.span),
     avgServiceMinutes: d.stops ? round(d.service / d.stops) : 0,
-    revenue: round(d.revenue, 2),
+    revenue: dollars(d.net),
+    tax: dollars(d.tax),
+    billed: dollars(d.net + d.tax),
     utilizationPct: d.span ? round((d.service / d.span) * 100) : null,
   }));
-  return { from, to, routeCode: routeCode || null, kpis, days: rows };
+  return { from, to, routeCode: routeCode || null, basis: 'net: invoice subtotal before tax', kpis, days: rows };
 }
 
 async function routeCalendar(req, res) {
@@ -131,4 +138,6 @@ async function routeCalendar(req, res) {
   res.json(payload);
 }
 
-module.exports = { routeCalendar };
+function invalidate() { cache.clear(); }
+
+module.exports = { routeCalendar, invalidate };

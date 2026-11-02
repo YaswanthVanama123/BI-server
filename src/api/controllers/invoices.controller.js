@@ -5,6 +5,10 @@ const { getSourceDb } = require('../../config/database');
 const { inFilterRange } = require('../lib/checkoutDate');
 const { models } = require('../../models');
 const { frequencyFor } = require('../../services/pricingMatch');
+const { snapshotMap } = require('../../services/invoiceSnapshots');
+const { effectiveLines, linesCents, netCents, dollars } = require('../lib/invoiceMoney');
+const invoiceRefreshJob = require('../../services/routestar/invoiceRefreshJob');
+const { lineHealth } = require('../../services/routestar/invoiceRefresh');
 
 const { CustomerAccount, InvoiceFrequency } = models;
 const clean = (v) => { const s = v == null ? '' : String(v).trim(); return s || undefined; };
@@ -17,9 +21,14 @@ function makeCache() {
   return {
     get(k) { const e = m.get(k); if (e && Date.now() - e.at < TTL_MS) return e.v; if (e) m.delete(k); return null; },
     set(k, v) { m.set(k, { at: Date.now(), v }); if (m.size > 40) m.delete(m.keys().next().value); },
+    clear() { m.clear(); },
   };
 }
 const payloadCache = makeCache();
+const HEALTH_TTL_MS = 30000;
+let healthCache = null;
+
+function invalidate() { payloadCache.clear(); healthCache = null; }
 
 const PROJECTION = {
   $project: {
@@ -126,10 +135,13 @@ async function invoiceDetail(req, res) {
   const det = d.invoiceDetails || {};
 
   const cid = customerIdFromLink(cust.link);
-  const [stored, acct] = await Promise.all([
+  const [stored, acct, snaps] = await Promise.all([
     InvoiceFrequency.findOne({ invoiceNumber: d.invoiceNumber }).lean(),
     cid ? CustomerAccount.findOne({ customerId: cid }, { pricing: 1 }).lean() : null,
+    snapshotMap(),
   ]);
+  const eff = effectiveLines(d, snaps.get(d.invoiceNumber));
+  const linesTotal = linesCents(eff.lines);
   const pricing = (acct && acct.pricing) || [];
   const storedByKey = new Map((stored && stored.lines ? stored.lines : []).map((l) => [`${l.item}||${l.rate}`, l.frequency]));
   const freqFor = (li) => {
@@ -157,10 +169,14 @@ async function invoiceDetail(req, res) {
     subtotal: Number(d.subtotal || 0),
     tax: Number(d.tax || 0),
     total: Number(d.total || 0),
+    linesSource: eff.source,
+    linesRefreshedAt: eff.refreshedAt,
+    linesTotal: dollars(linesTotal),
+    linesMatchSubtotal: linesTotal === netCents(d),
     serviceNotes: clean(d.serviceNotes) || clean(det.serviceNotes) || null,
     signedBy: clean(det.signedBy) || null,
     memo: clean(det.invoiceMemo) || null,
-    lineItems: (Array.isArray(d.lineItems) ? d.lineItems : []).map((li) => ({
+    lineItems: (Array.isArray(eff.lines) ? eff.lines : []).map((li) => ({
       name: clean(li.name) || '',
       description: clean(li.description) || '',
       quantity: Number(li.quantity || 0),
@@ -176,4 +192,16 @@ async function invoiceDetail(req, res) {
   }, { meta: { source: 'inventory_db' } }));
 }
 
-module.exports = { closedInvoices, invoiceDetail, warm, startWarmer };
+async function refreshLines(req, res) {
+  const all = !!(req.body && req.body.all);
+  res.json(buildEnvelope(invoiceRefreshJob.startSync({ all })));
+}
+
+async function refreshLinesStatus(req, res) {
+  if (!healthCache || Date.now() - healthCache.at > HEALTH_TTL_MS) {
+    healthCache = { at: Date.now(), health: await lineHealth() };
+  }
+  res.json(buildEnvelope({ job: invoiceRefreshJob.snapshot(), health: healthCache.health }));
+}
+
+module.exports = { closedInvoices, invoiceDetail, refreshLines, refreshLinesStatus, warm, startWarmer, invalidate };

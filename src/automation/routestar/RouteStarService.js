@@ -4,6 +4,7 @@ const RouteStarNavigator = require('./RouteStarNavigator');
 const { fetchClosedInvoices } = require('./fetchers/closedInvoices.fetcher');
 const { fetchCustomerAccounts } = require('./fetchers/customerAccounts.fetcher');
 const { fetchCustomerCreatedDates } = require('./fetchers/customerCreated.fetcher');
+const { fetchInvoiceDetail } = require('./fetchers/invoiceDetail.fetcher');
 const logger = require('../../utils/logger');
 
 class RouteStarService {
@@ -39,6 +40,11 @@ class RouteStarService {
   async fetchCustomerCreatedDates(opts = {}) {
     if (!this.opened) await this.open();
     return fetchCustomerCreatedDates({ session: this.session, navigator: this.navigator }, opts);
+  }
+
+  async fetchInvoiceDetail(opts = {}) {
+    if (!this.opened) await this.open();
+    return fetchInvoiceDetail({ session: this.session, navigator: this.navigator }, opts);
   }
 
   async run(task) {

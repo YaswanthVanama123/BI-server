@@ -27,6 +27,16 @@ const FREQUENCIES = [
   { normalizedFrequency: 'unknown', visitsPerYear: '0', sourceTextPatterns: [], isRecurring: false },
 ];
 
+const ROUTE_USERS_AS_OF = new Date('2026-10-26T00:00:00Z');
+const ROUTE_USERS = [
+  { routeCode: 'NRV1', name: 'Frank Diaz' },
+  { routeCode: 'NRV2', name: 'Brenda Calles' },
+  { routeCode: 'NRV3', name: 'Yerlin Morales' },
+  { routeCode: 'NRV4', name: 'Mariana Chusi' },
+  { routeCode: 'NRV5', name: 'Norma Villalva' },
+  { routeCode: 'NRV9', name: 'Michael Chusi' },
+];
+
 const RULES = [
   { key: 'stopsPerDayBenchmark', value: 10, valueType: 'number' },
   { key: 'largeGapThresholdMinutes', value: 180, valueType: 'number' },
@@ -70,7 +80,15 @@ const RULES = [
     );
   }
 
-  console.log(`seeded: ${CATEGORIES.length} categories, ${FREQUENCIES.length} frequencies, ${RULES.length} business rules`);
+  for (const u of ROUTE_USERS) {
+    await models.RouteUser.updateOne(
+      { routeCode: u.routeCode },
+      { $setOnInsert: { ...u, source: 'RouteStar route-user directory (root cause report, 2026-10-26)', asOf: ROUTE_USERS_AS_OF } },
+      { upsert: true },
+    );
+  }
+
+  console.log(`seeded: ${CATEGORIES.length} categories, ${FREQUENCIES.length} frequencies, ${RULES.length} business rules, ${ROUTE_USERS.length} route users`);
   await disconnectDatabase();
   process.exit(0);
 })().catch((e) => { console.error('seed failed:', e.message); process.exit(1); });

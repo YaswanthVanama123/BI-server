@@ -9,6 +9,7 @@ const {
 } = models;
 const accountJob = require('../../services/routestar/accountSyncJob');
 const distancesJob = require('../../services/mapbox/syncJob');
+const invoiceLinesJob = require('../../services/routestar/invoiceRefreshJob');
 
 const SYNC_TTL_MS = 15000;
 const syncDbCache = new Map();
@@ -83,7 +84,14 @@ async function importBatches(req, res) {
 async function syncStatus(req, res) {
   const acct = accountJob.snapshot();
   const dist = distancesJob.snapshot(req.tenant || req.tenantId);
+  const lines = invoiceLinesJob.snapshot();
   const running = [];
+  if (lines && lines.running) {
+    running.push({
+      type: 'invoice-lines', label: 'Invoice line-item refresh from RouteStar', phase: lines.phase,
+      startedAt: lines.startedAt, progress: { total: lines.total, refreshed: lines.refreshed, fixed: lines.fixed, failed: lines.failed },
+    });
+  }
   if (acct && acct.running) {
     running.push({
       type: 'customer-accounts', label: 'Customer account fetch', phase: acct.phase,

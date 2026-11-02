@@ -14,6 +14,8 @@ const analytics = require('./analytics.models');
 const customerAccount = require('./customerAccount.models');
 const sync = require('./sync.models');
 const invoiceFrequency = require('./invoiceFrequency.models');
+const invoiceSnapshot = require('./invoiceSnapshot.models');
+const routeUser = require('./routeUser.models');
 const user = require('./user.models');
 
 const models = {
@@ -30,6 +32,8 @@ const models = {
   ...customerAccount,
   ...sync,
   ...invoiceFrequency,
+  ...invoiceSnapshot,
+  ...routeUser,
   ...user,
 };
 

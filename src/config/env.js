@@ -29,6 +29,13 @@ const env = {
       minute: num(process.env.ACCOUNT_FETCH_MINUTE, 30),
       onStart: bool(process.env.ACCOUNT_FETCH_ON_START, false),
     },
+    invoiceRefresh: {
+      enabled: bool(process.env.INVOICE_REFRESH_ENABLED, true),
+      hour: num(process.env.INVOICE_REFRESH_HOUR, 2),
+      minute: num(process.env.INVOICE_REFRESH_MINUTE, 30),
+      onStart: bool(process.env.INVOICE_REFRESH_ON_START, false),
+      limit: num(process.env.INVOICE_REFRESH_LIMIT, 0),
+    },
   },
 
   browser: {

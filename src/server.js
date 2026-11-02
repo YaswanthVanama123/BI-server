@@ -18,6 +18,7 @@ connectDatabase().then(async () => {
 
   require('./services/auth/ensureAdmin').ensureDefaultAdmin();
   require('./scheduler/dailyAccountFetch').start();
+  require('./scheduler/dailyInvoiceRefresh').start();
   require('./api/controllers/checkins.controller').startWarmer();
   require('./api/controllers/operationsAnalytics.controller').startWarmer();
   require('./api/controllers/serviceVsDriveTime.controller').startWarmer();
